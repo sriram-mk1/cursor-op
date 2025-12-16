@@ -349,31 +349,33 @@ async def chat_completions(
     }
     
     # Call OpenRouter
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        if request.stream:
-            # Streaming response - pass through as-is
-            async def generate():
-                async with client.stream(
-                    "POST",
-                    f"{OPENROUTER_API_BASE}/chat/completions",
-                    json=openrouter_request,
-                    headers=headers
-                ) as response:
-                    # Pass through status and headers
-                    if response.status_code != 200:
-                        error_text = await response.aread()
-                        logger.error(f"OpenRouter error: {response.status_code} - {error_text}")
-                    
-                    async for chunk in response.aiter_bytes():
-                        yield chunk
-            
-            return StreamingResponse(
-                generate(),
-                media_type="text/event-stream"
-            )
-        else:
-            # Non-streaming response
+    if request.stream:
+        # Streaming response - keep client alive during streaming
+        async def generate():
             try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{OPENROUTER_API_BASE}/chat/completions",
+                        json=openrouter_request,
+                        headers=headers
+                    ) as response:
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+            except Exception as e:
+                logger.error(f"Streaming error: {e}")
+                # Yield error in SSE format
+                error_data = f'data: {{"error": "{str(e)}"}}\n\n'
+                yield error_data.encode()
+        
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream"
+        )
+    else:
+        # Non-streaming response
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{OPENROUTER_API_BASE}/chat/completions",
                     json=openrouter_request,
@@ -394,13 +396,13 @@ async def chat_completions(
                     status_code=response.status_code,
                     headers=response_headers
                 )
-            
-            except httpx.HTTPError as e:
-                logger.error(f"OpenRouter request failed: {e}")
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Failed to reach OpenRouter: {str(e)}"
-                )
+        
+        except httpx.HTTPError as e:
+            logger.error(f"OpenRouter request failed: {e}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to reach OpenRouter: {str(e)}"
+            )
 
 
 @app.get("/v1/models")
