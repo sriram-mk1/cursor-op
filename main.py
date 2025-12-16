@@ -151,7 +151,7 @@ optimizer = ContextOptimizer()
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 
-def extract_api_key(authorization: str = Header(None)):
+def extract_api_key(authorization: str):
     """Extract OpenRouter API key from Authorization header"""
     if not authorization:
         raise HTTPException(
@@ -159,9 +159,15 @@ def extract_api_key(authorization: str = Header(None)):
             detail="Missing Authorization header"
         )
     
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+    # Clean and parse authorization header
+    authorization = authorization.strip()
+    
+    # Handle both "Bearer token" and just "token" formats
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()  # Skip "Bearer "
+    else:
+        # Some clients might send token directly
+        token = authorization.strip()
     
     if not token:
         raise HTTPException(status_code=401, detail="Missing API key")
@@ -190,9 +196,9 @@ def extract_text_content(content: Union[str, List[ContentPart]]) -> str:
 @app.post("/api/v1/chat/completions")  # Also support OpenRouter's path
 async def chat_completions(
     request: ChatCompletionRequest,
-    authorization: str = Header(None),
-    http_referer: Optional[str] = Header(None),
-    x_title: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None, alias="authorization"),
+    http_referer: Optional[str] = Header(None, alias="http-referer"),
+    x_title: Optional[str] = Header(None, alias="x-title"),
 ):
     """
     OpenRouter-compatible chat completions with intelligent context optimization.
@@ -203,6 +209,9 @@ async def chat_completions(
     - max_chunks: Max context chunks to retain (default: 12)
     """
     # Extract OpenRouter API key
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    
     openrouter_api_key = extract_api_key(authorization)
     
     # Validate request
@@ -348,6 +357,10 @@ async def chat_completions(
         "X-Title": x_title or "Context Optimizer Gateway"
     }
     
+    # Debug log (hide most of key for security)
+    key_preview = f"{openrouter_api_key[:10]}...{openrouter_api_key[-4:]}" if len(openrouter_api_key) > 14 else "***"
+    logger.debug(f"Forwarding to OpenRouter with key: {key_preview}")
+    
     # Call OpenRouter
     if request.stream:
         # Streaming response - keep client alive during streaming
@@ -382,6 +395,11 @@ async def chat_completions(
                     headers=headers
                 )
                 
+                # Log errors from OpenRouter
+                if response.status_code != 200:
+                    error_body = response.text
+                    logger.error(f"OpenRouter error {response.status_code}: {error_body}")
+                
                 # Build response headers
                 response_headers = {}
                 if optimization_applied:
@@ -390,7 +408,7 @@ async def chat_completions(
                     response_headers["X-Context-Optimized-Messages"] = str(len(messages))
                     response_headers["X-Context-Token-Savings"] = f"{optimization_stats.get('percent_saved', 0):.1f}%"
                 
-                # Return exact OpenRouter response
+                # Return exact OpenRouter response (including errors)
                 return JSONResponse(
                     content=response.json(),
                     status_code=response.status_code,
@@ -407,8 +425,10 @@ async def chat_completions(
 
 @app.get("/v1/models")
 @app.get("/api/v1/models")
-async def list_models(authorization: str = Header(None)):
+async def list_models(authorization: Optional[str] = Header(None)):
     """List available OpenRouter models"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
     openrouter_api_key = extract_api_key(authorization)
     
     try:
@@ -428,8 +448,10 @@ async def list_models(authorization: str = Header(None)):
 
 @app.get("/v1/models/{model_id}")
 @app.get("/api/v1/models/{model_id}")
-async def get_model(model_id: str, authorization: str = Header(None)):
+async def get_model(model_id: str, authorization: Optional[str] = Header(None)):
     """Get specific model info (proxy to OpenRouter)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
     openrouter_api_key = extract_api_key(authorization)
     
     try:
@@ -449,8 +471,10 @@ async def get_model(model_id: str, authorization: str = Header(None)):
 
 @app.get("/v1/models/{model_id}/endpoints")
 @app.get("/api/v1/models/{model_id}/endpoints")
-async def get_model_endpoints(model_id: str, authorization: str = Header(None)):
+async def get_model_endpoints(model_id: str, authorization: Optional[str] = Header(None)):
     """Get model endpoints (proxy to OpenRouter)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
     openrouter_api_key = extract_api_key(authorization)
     
     try:
@@ -475,9 +499,11 @@ async def get_model_endpoints(model_id: str, authorization: str = Header(None)):
 @app.get("/api/v1/generation")
 async def get_generation(
     id: str,
-    authorization: str = Header(None)
+    authorization: Optional[str] = Header(None)
 ):
     """Query generation stats by ID (OpenRouter passthrough)"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
     openrouter_api_key = extract_api_key(authorization)
     
     try:
