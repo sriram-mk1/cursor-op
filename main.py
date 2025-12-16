@@ -42,7 +42,7 @@ class ChatCompletionRequest(BaseModel):
 
 app = FastAPI(
     title="Context Optimizer Gateway",
-    version="0.3.0",
+    version="0.3.1",
     description="OpenAI-compatible gateway with automatic context optimization. Drop-in replacement for AI editors."
 )
 optimizer = ContextOptimizer()
@@ -227,7 +227,7 @@ async def list_models(authorization: str = Header(None)):
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "context-optimizer-gateway", "version": "0.3.0"}
+    return {"status": "healthy", "service": "context-optimizer-gateway", "version": "0.3.1"}
 
 
 @app.get("/")
@@ -235,7 +235,7 @@ async def root():
     """Root endpoint with usage instructions"""
     return {
         "service": "Context Optimizer Gateway",
-        "version": "0.3.0",
+        "version": "0.3.1",
         "description": "OpenAI-compatible gateway with automatic context optimization. Drop-in replacement for AI editors.",
         "endpoints": {
             "chat_completions": "/v1/chat/completions",
