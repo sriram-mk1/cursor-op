@@ -3,18 +3,25 @@
 ## Gateway Information
 
 - **Base URL**: `https://cursor-op.onrender.com`
-- **Gateway API Key**: `dev-key-12345` (change in production!)
+- **Authentication**: Your OpenRouter API key (`sk-or-v1-...`)
 - **Status**: ✅ Live and operational
+- **Compatibility**: Works with any OpenAI-compatible client
 
 ## Quick Start
+
+### Using in AI Editors (Cursor, VS Code, Continue, etc.)
+
+1. Open your editor's settings
+2. Set **Base URL**: `https://cursor-op.onrender.com`
+3. Set **API Key**: Your OpenRouter API key (`sk-or-v1-...`)
+4. Done! Context optimization is automatic.
 
 ### Using cURL
 
 ```bash
 curl -X POST https://cursor-op.onrender.com/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer dev-key-12345" \
-  -H "X-OpenRouter-API-Key: YOUR_OPENROUTER_KEY" \
+  -H "Authorization: Bearer sk-or-v1-your-openrouter-key" \
   -d '{
     "model": "google/gemini-2.0-flash-lite-001",
     "messages": [{"role": "user", "content": "Hello!"}]
@@ -28,10 +35,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="https://cursor-op.onrender.com/v1",
-    api_key="dev-key-12345",  # Gateway key
-    default_headers={
-        "X-OpenRouter-API-Key": "YOUR_OPENROUTER_KEY"
-    }
+    api_key="sk-or-v1-your-openrouter-key"  # Your OpenRouter API key
 )
 
 response = client.chat.completions.create(
@@ -75,8 +79,7 @@ Any OpenRouter-compatible model, for example:
 List all models:
 ```bash
 curl https://cursor-op.onrender.com/v1/models \
-  -H "Authorization: Bearer dev-key-12345" \
-  -H "X-OpenRouter-API-Key: YOUR_OPENROUTER_KEY"
+  -H "Authorization: Bearer sk-or-v1-your-openrouter-key"
 ```
 
 ## Endpoints
@@ -122,17 +125,15 @@ All standard OpenAI chat completion parameters are supported:
 
 ## Security
 
-### Gateway Authentication
+### Authentication
 
-All requests require:
-- `Authorization: Bearer <gateway-key>` header
+All requests require your OpenRouter API key:
+- `Authorization: Bearer sk-or-v1-your-key`
 
-### BYOK (Bring Your Own Key)
-
-All requests require:
-- `X-OpenRouter-API-Key: <your-openrouter-key>` header
-
-The gateway never stores your OpenRouter API key.
+**Privacy**: 
+- The gateway never stores your API key
+- All requests are proxied directly to OpenRouter
+- No logging of API keys or sensitive data
 
 ## Testing
 
@@ -143,14 +144,12 @@ python test_gateway.py
 
 ## Production Deployment
 
-### Change Gateway Key
+### Deploy Your Own
 
-1. Update environment variable on Render:
-   ```
-   GATEWAY_API_KEY=your-super-secure-key-here
-   ```
-
-2. Restart the service
+1. Fork the repo on GitHub
+2. Create new Web Service on Render
+3. Connect your GitHub repo
+4. Deploy! (No environment variables needed)
 
 ### Monitor Usage
 
@@ -160,10 +159,8 @@ https://dashboard.render.com/web/srv-d50dm1npm1nc73elbosg
 ## Troubleshooting
 
 ### 401 Unauthorized
-- Check your gateway API key in `Authorization` header
-
-### 400 Bad Request - Missing X-OpenRouter-API-Key
-- Add `X-OpenRouter-API-Key` header with your OpenRouter key
+- Check your OpenRouter API key in `Authorization: Bearer sk-or-v1-...` header
+- Verify your OpenRouter API key is valid at https://openrouter.ai/keys
 
 ### 400 Bad Request - Invalid model ID
 - Verify model name is correct

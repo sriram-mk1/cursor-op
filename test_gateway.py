@@ -4,13 +4,11 @@ import json
 import requests
 
 BASE_URL = "https://cursor-op.onrender.com"
-GATEWAY_KEY = "dev-key-12345"
 OPENROUTER_KEY = "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"
 MODEL = "google/gemini-2.0-flash-lite-001"
 
 headers = {
-    "Authorization": f"Bearer {GATEWAY_KEY}",
-    "X-OpenRouter-API-Key": OPENROUTER_KEY,
+    "Authorization": f"Bearer {OPENROUTER_KEY}",
     "Content-Type": "application/json"
 }
 
@@ -108,7 +106,7 @@ def test_error_handling():
     print("🔍 Testing error handling (missing API key)...")
     response = requests.post(
         f"{BASE_URL}/v1/chat/completions",
-        headers={"Authorization": f"Bearer {GATEWAY_KEY}"},  # Missing OpenRouter key
+        headers={"Content-Type": "application/json"},  # Missing Authorization
         json={
             "model": MODEL,
             "messages": [{"role": "user", "content": "test"}]
@@ -134,5 +132,9 @@ if __name__ == "__main__":
     print("=" * 70)
     print()
     print(f"📍 Base URL: {BASE_URL}")
-    print(f"🔑 Gateway Key: {GATEWAY_KEY}")
+    print(f"🔑 API Key: {OPENROUTER_KEY[:20]}...")
     print(f"🤖 Model: {MODEL}")
+    print()
+    print("🎯 To use in AI editors:")
+    print(f"   Base URL: {BASE_URL}")
+    print(f"   API Key: <your-openrouter-key>")

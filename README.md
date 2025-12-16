@@ -4,45 +4,42 @@ OpenAI-compatible LLM gateway that automatically optimizes context before forwar
 
 ## Features
 
-- **OpenAI-compatible API**: Drop-in replacement for OpenAI's chat completions endpoint
+- **Drop-in Replacement**: Works with Cursor, VS Code, Continue, and any OpenAI-compatible client
 - **Automatic Context Optimization**: Intelligently compresses long conversation histories
-- **BYOK (Bring Your Own Key)**: Uses your OpenRouter API key for model access
+- **Simple Setup**: Just set base URL and your OpenRouter API key
 - **Streaming Support**: Full support for streaming responses
 - **Zero External Dependencies**: No databases, embeddings, or vector stores required
+- **All OpenRouter Models**: Access to 200+ models through one gateway
 
 ## Quickstart
 
+### For AI Editors (Cursor, VS Code, etc.)
+
+**Live Gateway**: `https://cursor-op.onrender.com`
+
+1. Open your AI editor settings
+2. Set custom base URL: `https://cursor-op.onrender.com`
+3. Set API key: Your OpenRouter API key (`sk-or-v1-...`)
+4. That's it! Context optimization is automatic.
+
+### Using with cURL
+
+```bash
+curl -X POST https://cursor-op.onrender.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-or-v1-your-openrouter-key" \
+  -d '{
+    "model": "google/gemini-2.0-flash-lite-001",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
 ### Local Development
 
-1. Clone and install:
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-2. Set environment variables:
-```bash
-cp .env.example .env
-# Edit .env and set your GATEWAY_API_KEY
-```
-
-3. Run the server:
-```bash
 uvicorn main:app --reload
-```
-
-### Using the Gateway
-
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer your-gateway-key" \
-  -H "X-OpenRouter-API-Key: your-openrouter-key" \
-  -d '{
-    "model": "anthropic/claude-3.5-sonnet",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "enable_optimization": true
-  }'
 ```
 
 ## API Endpoints
@@ -51,16 +48,15 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 OpenAI-compatible chat completions with automatic context optimization.
 
 **Headers:**
-- `Authorization: Bearer <gateway-key>` (required)
-- `X-OpenRouter-API-Key: <your-openrouter-key>` (required)
+- `Authorization: Bearer <your-openrouter-key>` (required)
 
 **Body Parameters:**
-- `model`: OpenRouter model ID (e.g., `anthropic/claude-3.5-sonnet`)
+- `model`: OpenRouter model ID (e.g., `google/gemini-2.0-flash-lite-001`)
 - `messages`: Array of message objects
 - `enable_optimization`: Enable context optimization (default: `true`)
 - `target_token_budget`: Max tokens for optimized context
 - `max_chunks`: Max context chunks to retain (default: 12)
-- All standard OpenAI parameters supported
+- All standard OpenAI parameters supported (`temperature`, `max_tokens`, `stream`, etc.)
 
 ### `GET /v1/models`
 List available OpenRouter models.
@@ -71,25 +67,40 @@ Health check endpoint.
 ## Python Client Example
 
 ```python
-import openai
+from openai import OpenAI
 
-client = openai.OpenAI(
-    base_url="https://your-gateway.onrender.com/v1",
-    api_key="your-gateway-key",
-    default_headers={
-        "X-OpenRouter-API-Key": "your-openrouter-key"
-    }
+client = OpenAI(
+    base_url="https://cursor-op.onrender.com/v1",
+    api_key="sk-or-v1-your-openrouter-key"  # Your OpenRouter API key
 )
 
 response = client.chat.completions.create(
-    model="anthropic/claude-3.5-sonnet",
+    model="google/gemini-2.0-flash-lite-001",
     messages=[
-        {"role": "user", "content": "Tell me about context optimization"}
-    ],
-    extra_body={"enable_optimization": True}
+        {"role": "user", "content": "Hello!"}
+    ]
 )
 
 print(response.choices[0].message.content)
+```
+
+### Context Optimization (Automatic)
+
+Context optimization is enabled by default for conversations with 4+ messages:
+
+```python
+# Long conversation - automatically optimized!
+response = client.chat.completions.create(
+    model="google/gemini-2.0-flash-lite-001",
+    messages=[
+        {"role": "user", "content": "My favorite color is blue."},
+        {"role": "assistant", "content": "That's nice!"},
+        {"role": "user", "content": "I love Python programming."},
+        {"role": "assistant", "content": "Great choice!"},
+        {"role": "user", "content": "What was my favorite color?"}
+    ]
+)
+# Token savings: 40-70% on long conversations!
 ```
 
 ## Fixtures & Benchmarks
@@ -112,14 +123,18 @@ Run `pytest` for chunking, BM25 retrieval, SimHash dedup, and shrinker coverage.
 3. **Forwarding**: Optimized request is sent to OpenRouter
 4. **Response**: LLM response is returned to client
 
-## Deployment to Render
+## Deployment
 
-The service is ready to deploy to Render:
+### Live Instance
 
-1. Push to GitHub
+Already deployed at: `https://cursor-op.onrender.com`
+
+### Deploy Your Own
+
+1. Fork the repo
 2. Create new Web Service on Render
-3. Set environment variable: `GATEWAY_API_KEY=<your-secure-key>`
-4. Deploy!
+3. Connect your GitHub repo
+4. Deploy! (No environment variables needed)
 
 ## Token Savings
 

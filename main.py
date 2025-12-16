@@ -37,26 +37,28 @@ class ChatCompletionRequest(BaseModel):
 
 app = FastAPI(
     title="Context Optimizer Gateway",
-    version="0.2.0",
-    description="OpenAI-compatible gateway with automatic context optimization"
+    version="0.3.0",
+    description="OpenAI-compatible gateway with automatic context optimization. Drop-in replacement for AI editors."
 )
 optimizer = ContextOptimizer()
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY", "dev-key-12345")
 
 
-def verify_gateway_key(authorization: str = Header(None)):
-    """Verify the gateway API key"""
+def extract_api_key(authorization: str = Header(None)):
+    """Extract OpenRouter API key from Authorization header"""
     if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+        raise HTTPException(
+            status_code=401, 
+            detail="Missing Authorization header. Provide your OpenRouter API key as: Authorization: Bearer sk-or-v1-..."
+        )
     
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+        raise HTTPException(status_code=401, detail="Invalid authorization scheme. Use: Authorization: Bearer <api-key>")
     
-    if token != GATEWAY_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing API key in Authorization header")
     
     return token
 
@@ -65,23 +67,19 @@ def verify_gateway_key(authorization: str = Header(None)):
 async def chat_completions(
     request: ChatCompletionRequest,
     authorization: str = Header(None),
-    x_openrouter_api_key: Optional[str] = Header(None, alias="X-OpenRouter-API-Key"),
 ):
     """
     OpenAI-compatible chat completions endpoint with context optimization.
     
-    Provide your OpenRouter API key via X-OpenRouter-API-Key header.
-    Gateway authentication via Authorization: Bearer <gateway-key>
-    """
-    # Verify gateway access
-    verify_gateway_key(authorization)
+    Provide your OpenRouter API key via standard Authorization header:
+    Authorization: Bearer sk-or-v1-...
     
-    # Check for OpenRouter API key
-    if not x_openrouter_api_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Missing X-OpenRouter-API-Key header. This gateway requires BYOK (Bring Your Own Key)."
-        )
+    Works seamlessly with AI editors (Cursor, VS Code, etc.) by setting:
+    - Base URL: https://cursor-op.onrender.com
+    - API Key: Your OpenRouter API key
+    """
+    # Extract OpenRouter API key
+    openrouter_api_key = extract_api_key(authorization)
     
     # Extract messages
     messages = [msg.dict() for msg in request.messages]
@@ -148,9 +146,9 @@ async def chat_completions(
     # Call OpenRouter
     async with httpx.AsyncClient(timeout=60.0) as client:
         headers = {
-            "Authorization": f"Bearer {x_openrouter_api_key}",
+            "Authorization": f"Bearer {openrouter_api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://context-optimizer-gateway.onrender.com",
+            "HTTP-Referer": "https://cursor-op.onrender.com",
             "X-Title": "Context Optimizer Gateway"
         }
         
@@ -192,20 +190,14 @@ async def chat_completions(
 
 
 @app.get("/v1/models")
-async def list_models(
-    authorization: str = Header(None),
-    x_openrouter_api_key: Optional[str] = Header(None, alias="X-OpenRouter-API-Key"),
-):
+async def list_models(authorization: str = Header(None)):
     """Proxy OpenRouter models list"""
-    verify_gateway_key(authorization)
-    
-    if not x_openrouter_api_key:
-        raise HTTPException(status_code=400, detail="Missing X-OpenRouter-API-Key header")
+    openrouter_api_key = extract_api_key(authorization)
     
     async with httpx.AsyncClient() as client:
         response = await client.get(
             f"{OPENROUTER_API_BASE}/models",
-            headers={"Authorization": f"Bearer {x_openrouter_api_key}"}
+            headers={"Authorization": f"Bearer {openrouter_api_key}"}
         )
         return response.json()
 
@@ -213,7 +205,7 @@ async def list_models(
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "context-optimizer-gateway", "version": "0.2.0"}
+    return {"status": "healthy", "service": "context-optimizer-gateway", "version": "0.3.0"}
 
 
 @app.get("/")
@@ -221,17 +213,22 @@ async def root():
     """Root endpoint with usage instructions"""
     return {
         "service": "Context Optimizer Gateway",
-        "version": "0.2.0",
-        "description": "OpenAI-compatible gateway with automatic context optimization",
+        "version": "0.3.0",
+        "description": "OpenAI-compatible gateway with automatic context optimization. Drop-in replacement for AI editors.",
         "endpoints": {
             "chat_completions": "/v1/chat/completions",
             "models": "/v1/models",
             "health": "/health"
         },
+        "setup": {
+            "base_url": "https://cursor-op.onrender.com",
+            "api_key": "Your OpenRouter API key (sk-or-v1-...)",
+            "compatibility": "Works with Cursor, VS Code, Continue, and any OpenAI-compatible client"
+        },
         "usage": {
-            "gateway_auth": "Set Authorization: Bearer <gateway-key> header",
-            "openrouter_key": "Set X-OpenRouter-API-Key: <your-openrouter-key> header",
-            "optimization": "Set enable_optimization: true in request body (default: true)"
+            "authentication": "Standard Authorization: Bearer <your-openrouter-key>",
+            "optimization": "Automatic context optimization (disable with enable_optimization: false)",
+            "models": "All OpenRouter models supported"
         }
     }
 
