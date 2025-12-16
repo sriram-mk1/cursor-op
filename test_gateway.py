@@ -34,7 +34,7 @@ def test_simple_completion():
         }
     )
     result = response.json()
-    content = result["content"][0]["message"]["content"]
+    content = result["choices"][0]["message"]["content"]
     tokens = result["usage"]["total_tokens"]
     print(f"✅ Response: {content.strip()}")
     print(f"📊 Tokens used: {tokens}\n")
@@ -138,3 +138,4 @@ if __name__ == "__main__":
     print("🎯 To use in AI editors:")
     print(f"   Base URL: {BASE_URL}")
     print(f"   API Key: <your-openrouter-key>")
+

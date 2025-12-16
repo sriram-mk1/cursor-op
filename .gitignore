@@ -64,3 +64,4 @@ Thumbs.db
 # Project specific
 fixtures/*.json
 !fixtures/.gitkeep
+

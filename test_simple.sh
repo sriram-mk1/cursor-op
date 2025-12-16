@@ -32,3 +32,4 @@ echo ""
 echo "🎯 For AI Editors (Cursor, VS Code, Continue):"
 echo "   Base URL: https://cursor-op.onrender.com"
 echo "   API Key: <your-openrouter-key>"
+
