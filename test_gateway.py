@@ -34,7 +34,7 @@ def test_simple_completion():
         }
     )
     result = response.json()
-    content = result["choices"][0]["message"]["content"]
+    content = result["content"][0]["message"]["content"]
     tokens = result["usage"]["total_tokens"]
     print(f"✅ Response: {content.strip()}")
     print(f"📊 Tokens used: {tokens}\n")
