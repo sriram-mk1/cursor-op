@@ -16,12 +16,16 @@ logger = logging.getLogger("context-optimizer-gateway")
 
 
 class Message(BaseModel):
+    model_config = {"extra": "allow"}  # Allow extra fields from AI editors
+    
     role: str
     content: str
     name: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = {"extra": "allow"}  # Allow extra fields from AI editors
+    
     model: str
     messages: List[Message]
     temperature: Optional[float] = 1.0
@@ -135,23 +139,15 @@ async def chat_completions(
                 messages[-1]  # Latest user message
             ]
     
-    # Prepare request for OpenRouter
-    openrouter_request = {
-        "model": request.model,
-        "messages": messages,
-        "temperature": request.temperature,
-        "top_p": request.top_p,
-        "n": request.n,
-        "stream": request.stream,
-        "max_tokens": request.max_tokens,
-        "presence_penalty": request.presence_penalty,
-        "frequency_penalty": request.frequency_penalty,
-    }
+    # Prepare request for OpenRouter - pass through all fields except our custom ones
+    request_dict = request.model_dump(exclude_none=True)
     
-    if request.stop:
-        openrouter_request["stop"] = request.stop
-    if request.logit_bias:
-        openrouter_request["logit_bias"] = request.logit_bias
+    # Remove our custom optimization params
+    optimization_params = {"enable_optimization", "target_token_budget", "max_chunks"}
+    openrouter_request = {k: v for k, v in request_dict.items() if k not in optimization_params}
+    
+    # Update messages with optimized ones if applicable
+    openrouter_request["messages"] = messages
     
     # Call OpenRouter
     async with httpx.AsyncClient(timeout=60.0) as client:
