@@ -303,8 +303,7 @@ async def chat_completions(
             result = optimizer.optimize(
                 session_id,
                 query_text,
-                target_token_budget=request.target_token_budget or 2000,
-                cache_ttl_sec=300
+                target_token_budget=request.target_token_budget or 2000
             )
             
             # Apply optimization if we got useful results
@@ -320,9 +319,9 @@ async def chat_completions(
                 optimized_chunks = optimization_result.get("optimized_context", [])
                 context_parts = []
                 for chunk in optimized_chunks:
-                    summary = chunk.get("summary", "")
-                    if summary:
-                        context_parts.append(summary)
+                    content = chunk.get("content", "")
+                    if content:
+                        context_parts.append(content)
                 
                 optimized_context = "\n\n".join(context_parts)
                 

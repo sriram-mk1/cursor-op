@@ -121,11 +121,6 @@ class ContextOptimizer:
         2. Keep ALL chunks above min_similarity threshold
         3. Fill up to target_token_budget
         """
-        logger.info(f"\n{'='*80}")
-        logger.info(f"OPTIMIZATION START")
-        logger.info(f"Session: {session_id} | Query: '{query_text}'")
-        logger.info(f"Budget: {target_token_budget} tokens | Min Similarity: {min_similarity}")
-        
         all_chunks = self.sessions.get(session_id, [])
         if not all_chunks:
             return {"optimized_context": [], "original_tokens": 0, "optimized_tokens": 0, "percent_saved": 0}
@@ -178,9 +173,7 @@ class ContextOptimizer:
         # Calculate stats
         percent_saved = ((original_tokens - current_tokens) / original_tokens * 100) if original_tokens > 0 else 0
         
-        logger.info(f"Selected {len(selected_chunks)}/{len(all_chunks)} chunks")
-        logger.info(f"Tokens: {original_tokens} → {current_tokens} ({percent_saved:.1f}% saved)")
-        logger.info(f"{'='*80}\n")
+        logger.info(f"Optimization: {original_tokens} -> {current_tokens} tokens ({percent_saved:.1f}% saved). Selected {len(selected_chunks)} chunks.")
         
         return {
             "optimized_context": selected_chunks,
