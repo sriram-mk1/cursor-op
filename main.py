@@ -480,8 +480,57 @@ async def chat_completions(
                     headers=headers
                 )
                 
+                response_data = response.json()
+                
                 if response.status_code != 200:
                     log.error(f"OpenRouter error {response.status_code}: {response.text[:200]}")
+                else:
+                    # ================================================================
+                    # FETCH REAL ANALYTICS FROM OPENROUTER
+                    # ================================================================
+                    generation_id = response_data.get("id")
+                    
+                    if generation_id:
+                        # Fetch real usage stats
+                        try:
+                            usage_response = await client.get(
+                                f"{OPENROUTER_API_BASE}/generation",
+                                params={"id": generation_id},
+                                headers={"Authorization": f"Bearer {api_key}"}
+                            )
+                            
+                            if usage_response.status_code == 200:
+                                usage_data = usage_response.json().get("data", {})
+                                
+                                # Extract real token counts
+                                real_prompt_tokens = usage_data.get("tokens_prompt", 0)
+                                real_completion_tokens = usage_data.get("tokens_completion", 0)
+                                real_total = real_prompt_tokens + real_completion_tokens
+                                cost = usage_data.get("total_cost", 0)
+                                model = usage_data.get("model", "unknown")
+                                
+                                log.info(f"📊 OPENROUTER ANALYTICS (Real):")
+                                log.info(f"   Model: {model}")
+                                log.info(f"   Prompt tokens: {real_prompt_tokens:,}")
+                                log.info(f"   Completion tokens: {real_completion_tokens:,}")
+                                log.info(f"   Total tokens: {real_total:,}")
+                                log.info(f"   Cost: ${cost:.6f}")
+                                
+                                # Compare with our estimate
+                                if stats.output_tokens > 0:
+                                    diff = real_prompt_tokens - stats.output_tokens
+                                    diff_pct = (diff / stats.output_tokens) * 100 if stats.output_tokens else 0
+                                    log.info(f"   Our estimate: {stats.output_tokens:,} (diff: {diff_pct:+.1f}%)")
+                            else:
+                                log.warning(f"Could not fetch generation stats: {usage_response.status_code}")
+                        except Exception as e:
+                            log.warning(f"Failed to fetch real analytics: {e}")
+                    
+                    # Also log usage from response if available
+                    usage = response_data.get("usage", {})
+                    if usage:
+                        log.info(f"📈 Response usage: prompt={usage.get('prompt_tokens', 0):,}, "
+                                f"completion={usage.get('completion_tokens', 0):,}")
                 
                 # Add our headers
                 response_headers = {
@@ -492,7 +541,7 @@ async def chat_completions(
                 }
                 
                 return JSONResponse(
-                    content=response.json(),
+                    content=response_data,
                     status_code=response.status_code,
                     headers=response_headers
                 )
