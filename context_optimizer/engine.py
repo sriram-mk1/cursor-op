@@ -166,65 +166,72 @@ class ContextOptimizer:
             except Exception as e:
                 logger.error(f"Embedding failed: {e}, falling back to recency")
                 for i, chunk in enumerate(all_chunks):
-                    scored_chunks.append((i, chunk))
+                    scored_chunks.append((float(i) / len(all_chunks), chunk))
         else:
             logger.warning("No model available, using recency")
             for i, chunk in enumerate(all_chunks):
-                scored_chunks.append((i, chunk))
+                scored_chunks.append((float(i) / len(all_chunks), chunk))
         
         # Sort by score descending
         scored_chunks.sort(key=lambda x: x[0], reverse=True)
         
-        # STEP 2: SELECTION - Pick top chunks
+        # STEP 2: AGGRESSIVE SELECTION - Only keep BEST chunks above similarity threshold
         logger.info(f"\n{'─'*80}")
-        logger.info("STEP 2: SELECTION (Top-K Ranking)")
+        logger.info("STEP 2: AGGRESSIVE SELECTION (High Similarity Only)")
         logger.info(f"{'─'*80}")
         
-        selected_chunks = [chunk for _, chunk in scored_chunks[:max_chunks]]
-        logger.info(f"Selected top {len(selected_chunks)} chunks")
+        # Calculate similarity threshold - only keep chunks that are truly relevant
+        if scored_chunks:
+            top_score = scored_chunks[0][0]
+            # Adaptive threshold: at least 70% of top score, or absolute minimum of 0.3
+            similarity_threshold = max(0.3, top_score * 0.7)
+            logger.info(f"Similarity threshold: {similarity_threshold:.4f} (top score: {top_score:.4f})")
+        else:
+            similarity_threshold = 0.0
+        
+        # Filter by similarity threshold first
+        high_similarity_chunks = [(score, chunk) for score, chunk in scored_chunks if score >= similarity_threshold]
+        
+        logger.info(f"Chunks above threshold: {len(high_similarity_chunks)}/{len(scored_chunks)}")
+        
+        # Then take top max_chunks from the high-similarity set
+        selected_scored = high_similarity_chunks[:max_chunks]
+        selected_chunks = [chunk for _, chunk in selected_scored]
+        
+        logger.info(f"Final selection: {len(selected_chunks)} chunks")
+        for i, (score, chunk) in enumerate(selected_scored, 1):
+            logger.info(f"  #{i}: similarity={score:.4f}, tokens={chunk['tokens']}")
         
         # Sort by original order to maintain conversation flow
         selected_chunks.sort(key=lambda x: (x['event_idx'], x['chunk_idx']))
         
-        # STEP 3: SHRINKING - Aggressively reduce content
+        # STEP 3: BUILD CONTEXT (No shrinking - use full chunks)
         logger.info(f"\n{'─'*80}")
-        logger.info("STEP 3: SHRINKING (Aggressive Reduction)")
+        logger.info("STEP 3: BUILD CONTEXT (Full Chunks, No Truncation)")
         logger.info(f"{'─'*80}")
         
         optimized_context = []
         total_optimized_tokens = 0
         
         for i, chunk in enumerate(selected_chunks):
-            original_content = chunk['content']
-            original_tokens = chunk['tokens']
+            content = chunk['content']
+            tokens = chunk['tokens']
             
-            # AGGRESSIVE SHRINKING: Take only first 100 tokens
-            shrunk_content = original_content
-            if original_tokens > 100:
-                tokens = self.encoding.encode(original_content)
-                shrunk_tokens = tokens[:100]
-                shrunk_content = self.encoding.decode(shrunk_tokens) + "..."
-            
-            shrunk_tokens = self._count_tokens(shrunk_content)
-            
-            # Check budget
-            if target_token_budget and (total_optimized_tokens + shrunk_tokens) > target_token_budget:
-                logger.info(f"  Chunk {i+1}: SKIPPED (would exceed budget)")
+            # Check budget - skip if this chunk would exceed it
+            if target_token_budget and (total_optimized_tokens + tokens) > target_token_budget:
+                logger.info(f"  Chunk {i+1}: SKIPPED (would exceed budget: {total_optimized_tokens + tokens} > {target_token_budget})")
                 continue
             
             optimized_context.append({
                 "role": chunk['role'],
                 "source": chunk['source'],
-                "content": shrunk_content,
-                "original_tokens": original_tokens,
-                "shrunk_tokens": shrunk_tokens,
-                "reduction": ((original_tokens - shrunk_tokens) / original_tokens * 100) if original_tokens > 0 else 0
+                "content": content,
+                "tokens": tokens
             })
             
-            total_optimized_tokens += shrunk_tokens
+            total_optimized_tokens += tokens
             
-            logger.info(f"  Chunk {i+1}: {original_tokens} → {shrunk_tokens} tokens ({((original_tokens - shrunk_tokens) / original_tokens * 100):.1f}% reduction)")
-            logger.info(f"    Preview: '{shrunk_content[:60]}...'")
+            logger.info(f"  Chunk {i+1}: {tokens} tokens - '{content[:60]}...'")
         
         # Calculate final stats
         percent_saved = ((original_tokens - total_optimized_tokens) / original_tokens * 100) if original_tokens > 0 else 0
