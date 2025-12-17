@@ -17,10 +17,13 @@ class ContextOptimizer:
             logger.info("Loading embedding model: sentence-transformers/static-retrieval-mrl-en-v1 with 128-dim truncation...")
             self.model = SentenceTransformer("sentence-transformers/static-retrieval-mrl-en-v1", device="cpu", truncate_dim=128)
             logger.info(f"✓ Model loaded successfully. Embedding dimension: 128")
-        except ImportError:
-            logger.error("sentence-transformers not installed!")
+        except ImportError as e:
+            logger.error(f"sentence-transformers import failed: {e}")
+            logger.error("Please install it with: pip install sentence-transformers")
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
+            logger.error(f"Failed to load model: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
         # Initialize tokenizer
         try:
@@ -109,149 +112,82 @@ class ContextOptimizer:
         self, 
         session_id: str, 
         query_text: str, 
-        max_chunks: int = 12, 
-        target_token_budget: Optional[int] = None,
-        cache_ttl_sec: int = 300
+        target_token_budget: int = 2000,
+        min_similarity: float = 0.35
     ) -> Dict[str, Any]:
         """
-        Optimize context by:
-        1. Retrieving most relevant chunks using embeddings
-        2. Selecting top chunks within budget
-        3. Shrinking content aggressively
+        Optimize context dynamically:
+        1. Retrieve chunks sorted by relevance
+        2. Keep ALL chunks above min_similarity threshold
+        3. Fill up to target_token_budget
         """
         logger.info(f"\n{'='*80}")
         logger.info(f"OPTIMIZATION START")
-        logger.info(f"{'='*80}")
-        logger.info(f"Session: {session_id}")
-        logger.info(f"Query: '{query_text}'")
-        logger.info(f"Max chunks: {max_chunks}")
-        logger.info(f"Token budget: {target_token_budget or 'unlimited'}")
+        logger.info(f"Session: {session_id} | Query: '{query_text}'")
+        logger.info(f"Budget: {target_token_budget} tokens | Min Similarity: {min_similarity}")
         
         all_chunks = self.sessions.get(session_id, [])
         if not all_chunks:
-            logger.warning("No chunks found in session!")
-            return {}
+            return {"optimized_context": [], "original_tokens": 0, "optimized_tokens": 0, "percent_saved": 0}
 
-        logger.info(f"\nTotal available chunks: {len(all_chunks)}")
-        
-        # Calculate original token count
         original_tokens = sum(c['tokens'] for c in all_chunks)
-        logger.info(f"Original total tokens: {original_tokens:,}")
         
-        # STEP 1: RETRIEVAL - Use embeddings to find relevant chunks
-        logger.info(f"\n{'─'*80}")
-        logger.info("STEP 1: RETRIEVAL (Semantic Similarity)")
-        logger.info(f"{'─'*80}")
-        
+        # STEP 1: RETRIEVAL
         scored_chunks = []
-        
         if self.model:
             try:
-                logger.info("Encoding query...")
                 query_embedding = self.model.encode(query_text, show_progress_bar=False)
-                
-                logger.info("Encoding chunks...")
                 chunk_texts = [c['content'] for c in all_chunks]
                 chunk_embeddings = self.model.encode(chunk_texts, show_progress_bar=False)
-                
-                logger.info("Computing similarities...")
-                similarities = self.model.similarity(query_embedding, chunk_embeddings)
+                similarities = self.model.similarity(query_embedding, chunk_embeddings)[0]
                 
                 for i, chunk in enumerate(all_chunks):
-                    score = float(similarities[0][i])
-                    scored_chunks.append((score, chunk))
-                    logger.info(f"  Chunk {i+1}: similarity={score:.4f}, tokens={chunk['tokens']}, preview='{chunk['content'][:50]}...'")
-                
-                logger.info("✓ Used semantic embeddings for retrieval")
+                    scored_chunks.append((float(similarities[i]), chunk))
             except Exception as e:
-                logger.error(f"Embedding failed: {e}, falling back to recency")
+                logger.error(f"Embedding failed: {e}")
+                # Fallback: keep recent chunks
                 for i, chunk in enumerate(all_chunks):
-                    scored_chunks.append((float(i) / len(all_chunks), chunk))
+                    scored_chunks.append((float(i)/len(all_chunks), chunk))
         else:
-            logger.warning("No model available, using recency")
-            for i, chunk in enumerate(all_chunks):
-                scored_chunks.append((float(i) / len(all_chunks), chunk))
+             for i, chunk in enumerate(all_chunks):
+                scored_chunks.append((float(i)/len(all_chunks), chunk))
         
-        # Sort by score descending
+        # Sort by relevance (highest first)
         scored_chunks.sort(key=lambda x: x[0], reverse=True)
         
-        # STEP 2: AGGRESSIVE SELECTION - Only keep BEST chunks above similarity threshold
-        logger.info(f"\n{'─'*80}")
-        logger.info("STEP 2: AGGRESSIVE SELECTION (High Similarity Only)")
-        logger.info(f"{'─'*80}")
+        # STEP 2: DYNAMIC SELECTION
+        selected_chunks = []
+        current_tokens = 0
         
-        # Calculate similarity threshold - only keep chunks that are truly relevant
-        if scored_chunks:
-            top_score = scored_chunks[0][0]
-            # Adaptive threshold: at least 60% of top score, or absolute minimum of 0.2
-            similarity_threshold = max(0.2, top_score * 0.6)
-            logger.info(f"Similarity threshold: {similarity_threshold:.4f} (top score: {top_score:.4f})")
-        else:
-            similarity_threshold = 0.0
-        
-        # Filter by similarity threshold first
-        high_similarity_chunks = [(score, chunk) for score, chunk in scored_chunks if score >= similarity_threshold]
-        
-        logger.info(f"Chunks above threshold: {len(high_similarity_chunks)}/{len(scored_chunks)}")
-        
-        # Then take top max_chunks from the high-similarity set
-        selected_scored = high_similarity_chunks[:max_chunks]
-        selected_chunks = [chunk for _, chunk in selected_scored]
-        
-        logger.info(f"Final selection: {len(selected_chunks)} chunks")
-        for i, (score, chunk) in enumerate(selected_scored, 1):
-            logger.info(f"  #{i}: similarity={score:.4f}, tokens={chunk['tokens']}")
-        
-        # Sort by original order to maintain conversation flow
+        for score, chunk in scored_chunks:
+            # 1. Similarity Check - Primary filter for relevance
+            if score < min_similarity:
+                continue
+                
+            # 2. Budget Check - Soft limit (only skip if WAY over budget, e.g. > 2x)
+            # We prioritize relevance over strict budgeting as requested
+            if target_token_budget and current_tokens > target_token_budget * 2:
+                logger.info(f"  Stopping selection: exceeded 2x budget ({current_tokens} > {target_token_budget*2})")
+                break
+                
+            selected_chunks.append(chunk)
+            current_tokens += chunk['tokens']
+            
+        # Sort by original order to maintain flow
         selected_chunks.sort(key=lambda x: (x['event_idx'], x['chunk_idx']))
         
-        # STEP 3: BUILD CONTEXT (No shrinking - use full chunks)
-        logger.info(f"\n{'─'*80}")
-        logger.info("STEP 3: BUILD CONTEXT (Full Chunks, No Truncation)")
-        logger.info(f"{'─'*80}")
+        # Calculate stats
+        percent_saved = ((original_tokens - current_tokens) / original_tokens * 100) if original_tokens > 0 else 0
         
-        optimized_context = []
-        total_optimized_tokens = 0
-        
-        for i, chunk in enumerate(selected_chunks):
-            content = chunk['content']
-            tokens = chunk['tokens']
-            
-            # Check budget - skip if this chunk would exceed it
-            if target_token_budget and (total_optimized_tokens + tokens) > target_token_budget:
-                logger.info(f"  Chunk {i+1}: SKIPPED (would exceed budget: {total_optimized_tokens + tokens} > {target_token_budget})")
-                continue
-            
-            optimized_context.append({
-                "role": chunk['role'],
-                "source": chunk['source'],
-                "content": content,
-                "tokens": tokens
-            })
-            
-            total_optimized_tokens += tokens
-            
-            logger.info(f"  Chunk {i+1}: {tokens} tokens - '{content[:60]}...'")
-        
-        # Calculate final stats
-        percent_saved = ((original_tokens - total_optimized_tokens) / original_tokens * 100) if original_tokens > 0 else 0
-        
-        logger.info(f"\n{'='*80}")
-        logger.info(f"OPTIMIZATION COMPLETE")
-        logger.info(f"{'='*80}")
-        logger.info(f"Original tokens:   {original_tokens:,}")
-        logger.info(f"Optimized tokens:  {total_optimized_tokens:,}")
-        logger.info(f"Tokens saved:      {original_tokens - total_optimized_tokens:,}")
-        logger.info(f"Reduction:         {percent_saved:.1f}%")
-        logger.info(f"Chunks selected:   {len(optimized_context)}")
+        logger.info(f"Selected {len(selected_chunks)}/{len(all_chunks)} chunks")
+        logger.info(f"Tokens: {original_tokens} → {current_tokens} ({percent_saved:.1f}% saved)")
         logger.info(f"{'='*80}\n")
         
         return {
-            "optimized_context": optimized_context,
+            "optimized_context": selected_chunks,
             "original_tokens": original_tokens,
-            "optimized_tokens": total_optimized_tokens,
-            "percent_saved": percent_saved,
-            "chunks_selected": len(optimized_context)
+            "optimized_tokens": current_tokens,
+            "percent_saved": percent_saved
         }
 
     def get_stats(self, session_id: str) -> Dict[str, Any]:
