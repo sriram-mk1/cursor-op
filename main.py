@@ -205,8 +205,6 @@ async def chat_completions(
             "X-Title": x_title or "Context Optimizer Gateway"
         }
         
-        log.info(f"🚀 Forwarding ({original_count} → {len(messages)} msgs, {processing_ms:.1f}ms)")
-        
         if request.stream:
             async def generate():
                 try:
@@ -240,7 +238,7 @@ async def chat_completions(
                     # Queue analytics fetch in background
                     generation_id = response_data.get("id")
                     if generation_id:
-                        background_tasks.add_task(fetch_and_log_analytics, generation_id, api_key)
+                        background_tasks.add_task(fetch_and_log_analytics, generation_id, api_key, original_count, len(messages), processing_ms)
                 
                 # Add our headers
                 response_headers = {
@@ -268,6 +266,33 @@ async def chat_completions(
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=f"Internal Gateway Error: {str(e)}")
+
+
+async def fetch_and_log_analytics(generation_id: str, api_key: str, orig_msgs: int, opt_msgs: int, proc_ms: float):
+    """Background task to fetch real analytics and log a single line summary."""
+    if not generation_id: return
+        
+    try:
+        # Wait for OpenRouter to process
+        await asyncio.sleep(1.5)
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            usage_response = await client.get(
+                f"{OPENROUTER_API_BASE}/generation",
+                params={"id": generation_id},
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+            
+            if usage_response.status_code == 200:
+                usage_data = usage_response.json().get("data", {})
+                total = usage_data.get("tokens_prompt", 0) + usage_data.get("tokens_completion", 0)
+                cost = usage_data.get("total_cost", 0)
+                model = usage_data.get("model", "unknown").split("/")[-1]
+                
+                # THE ONE-LINE SUMMARY
+                log.info(f"✅ [REQ] {orig_msgs}->{opt_msgs} msgs | {proc_ms:.0f}ms | {model} | {total:,} tkn | ${cost:.6f}")
+    except Exception as e:
+        log.debug(f"Async analytics failed: {e}")
 
 
 # ============================================================================

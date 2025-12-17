@@ -7,7 +7,7 @@ An OpenRouter-compatible API gateway with intelligent context optimization using
 - **Semantic Retrieval**: Uses `sentence-transformers/static-retrieval-mrl-en-v1` (4MB) for efficient CPU-based similarity search
 - **OpenRouter Compatible**: Drop-in replacement for OpenRouter API
 - **Automatic Optimization**: Intelligently shrinks conversation history based on query relevance
-- **Low Memory**: Optimized for 512MB RAM environments (Render free tier)
+- **Low Memory**: Optimized for 512MB RAM environments (Railway free tier)
 - **Fast**: Sub-second optimization even for large conversations
 - **Token Aware**: Accurate token counting with tiktoken
 
