@@ -365,35 +365,42 @@ async def chat_completions(
                 
                 optimized_context = "\n\n".join(formatted_context_parts)
                 
-                # Find system message position
-                system_msg_idx = None
-                for idx, msg in enumerate(messages):
-                    if msg.get("role") == "system":
-                        system_msg_idx = idx
-                        break
+                # RECONSTRUCT CONTEXT:
+                # We strictly send ONLY:
+                # 1. System message (with injected optimized context)
+                # 2. The final user query
+                # All intermediate history is removed because it is now represented in the optimized context.
                 
-                # Inject optimized context
+                final_messages = []
+                
+                # 1. Add System Message
                 if system_msg_idx is not None:
-                    # Append to existing system message
+                    # Update existing system message
                     existing_content = extract_text_content(messages[system_msg_idx].get("content", ""))
                     messages[system_msg_idx]["content"] = (
                         f"{existing_content}\n\n"
-                        f"[Previous conversation context - optimized]:\n{optimized_context}"
+                        f"[OPTIMIZED CONTEXT - PREVIOUS MESSAGES]:\n{optimized_context}"
                     )
+                    final_messages.append(messages[system_msg_idx])
                 else:
                     # Create new system message
-                    messages.insert(0, {
+                    final_messages.append({
                         "role": "system",
-                        "content": f"[Previous conversation context - optimized]:\n{optimized_context}"
+                        "content": f"[OPTIMIZED CONTEXT - PREVIOUS MESSAGES]:\n{optimized_context}"
                     })
                 
-                # Keep only the last user message after system context
-                messages = [messages[0], messages[-1]] if len(messages) > 1 else messages
+                # 2. Add Last User Message (The Query)
+                # We assume the last message is the user's query. 
+                # If the last message is not user (rare), we take the last message anyway.
+                if messages:
+                    last_msg = messages[-1]
+                    final_messages.append(last_msg)
                 
-                # Debug: Verify injection
-                sys_content = extract_text_content(messages[0].get("content", ""))
-                preview = sys_content[:100].replace("\n", " ")
-                logger.info(f"System Prompt Preview: {preview}...")
+                # REPLACE the messages list completely
+                messages = final_messages
+                
+                # Debug: Verify reconstruction
+                logger.info(f"Context Reconstruction: Reduced {original_message_count} messages -> {len(messages)} messages (System + Query)")
         
         except Exception as e:
             # Don't fail request if optimization fails, just log and continue
