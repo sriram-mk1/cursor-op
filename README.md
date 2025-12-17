@@ -27,14 +27,14 @@ python main.py
 
 Server runs on `http://localhost:8000`
 
-### Production Deployment (Render)
+### Production Deployment (Railway)
 
 1. Fork this repository
-2. Create a new Web Service on Render
-3. Connect your repository
-4. Use the following settings:
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
+2. Create a new project on Railway
+3. Connect your GitHub repository
+4. Railway will automatically detect `requirements.txt` and the `Procfile`
+5. The service will be deployed automatically
+
 
 
 ## 🔧 Usage
