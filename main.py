@@ -300,19 +300,20 @@ async def chat_completions(
             query_text = extract_text_content(latest_msg.get("content", ""))
             
             # Optimize context
-            result = optimizer.optimize(
+            # Optimize context
+            optimization_result = optimizer.optimize(
                 session_id,
                 query_text,
-                target_token_budget=request.target_token_budget or 2000
+                target_token_budget=request.target_token_budget or 100000  # Default to high budget, rely on similarity
             )
             
             # Apply optimization if we got useful results
-            if result.get("optimized_context"):
+            if optimization_result.get("optimized_context"):
                 optimization_applied = True
                 optimization_stats = {
-                    "raw_tokens": optimization_result.get("raw_token_est", 0),
-                    "optimized_tokens": optimization_result.get("optimized_token_est", 0),
-                    "percent_saved": optimization_result.get("percent_saved_est", 0)
+                    "raw_tokens": optimization_result.get("original_tokens", 0),
+                    "optimized_tokens": optimization_result.get("optimized_tokens", 0),
+                    "percent_saved": optimization_result.get("percent_saved", 0)
                 }
                 
                 # Build optimized context string
