@@ -7,6 +7,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
+import tiktoken
 
 from context_optimizer import ContextOptimizer
 
@@ -175,6 +176,30 @@ def extract_api_key(authorization: str):
     return token
 
 
+def count_messages_tokens(messages: List[Dict[str, Any]]) -> int:
+    """
+    Count total tokens in a list of messages using tiktoken (cl100k_base).
+    Includes rough estimate for message formatting overhead.
+    """
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    except:
+        encoding = tiktoken.get_encoding("p50k_base")
+        
+    num_tokens = 0
+    for message in messages:
+        # Every message follows <|start|>{role/name}\n{content}<|end|>\n
+        num_tokens += 4
+        for key, value in message.items():
+            if key == "content":
+                num_tokens += len(encoding.encode(extract_text_content(value)))
+            elif key == "role":
+                num_tokens += len(encoding.encode(str(value)))
+                
+    num_tokens += 3  # Every reply is primed with <|start|>assistant<|message|>
+    return num_tokens
+
+
 def extract_text_content(content: Union[str, List[ContentPart]]) -> str:
     """Extract text from message content (handles both string and ContentPart array)"""
     if isinstance(content, str):
@@ -327,11 +352,24 @@ async def chat_completions(
                 # Keep only the last user message after system context
                 messages = [messages[0], messages[-1]] if len(messages) > 1 else messages
                 
+                # Calculate actual final token count
+                final_token_count = count_messages_tokens(messages)
+                initial_token_count = count_messages_tokens(request.messages) if request.messages else original_message_count * 100 # fallback
+                
+                savings_pct = 0
+                if initial_token_count > 0:
+                    savings_pct = ((initial_token_count - final_token_count) / initial_token_count) * 100
+                
                 logger.info(
                     f"Optimization: {original_message_count} msgs → {len(messages)} msgs | "
-                    f"Tokens: {optimization_stats['raw_tokens']} → {optimization_stats['optimized_tokens']} "
-                    f"({optimization_stats['percent_saved']:.1f}% saved)"
+                    f"Real Tokens: {initial_token_count} → {final_token_count} "
+                    f"({savings_pct:.1f}% saved)"
                 )
+                
+                # Debug: Verify injection
+                sys_content = extract_text_content(messages[0].get("content", ""))
+                preview = sys_content[:100].replace("\n", " ")
+                logger.info(f"System Prompt Preview: {preview}...")
         
         except Exception as e:
             # Don't fail request if optimization fails, just log and continue
