@@ -89,6 +89,7 @@ class ChatCompletionRequest(BaseModel):
     
     # Our param
     enable_optimization: Optional[bool] = True
+    debug: Optional[bool] = False
 
 
 # ============================================================================
@@ -157,6 +158,7 @@ async def chat_completions(
     # Build request
     request_dict = request.model_dump(exclude_none=True)
     request_dict.pop("enable_optimization", None)
+    request_dict.pop("debug", None)
     request_dict["messages"] = messages
     request_dict.pop("prompt", None)
     
@@ -239,15 +241,26 @@ async def chat_completions(
                         log.info(f"📈 Usage: prompt={usage.get('prompt_tokens', 0):,}, "
                                 f"completion={usage.get('completion_tokens', 0):,}")
                 
+                # Add our headers
+                response_headers = {
+                    "X-Context-Request-Id": request_id,
+                    "X-Context-Original-Msgs": str(original_count),
+                    "X-Context-Optimized-Msgs": str(len(messages)),
+                    "X-Context-Processing-Ms": f"{processing_ms:.1f}",
+                }
+                
+                # If debug is enabled, include reconstructed messages in the response
+                if request.debug:
+                    response_data["_debug"] = {
+                        "reconstructed_messages": messages,
+                        "original_count": original_count,
+                        "optimized_count": len(messages)
+                    }
+                
                 return JSONResponse(
                     content=response_data,
                     status_code=response.status_code,
-                    headers={
-                        "X-Context-Request-Id": request_id,
-                        "X-Context-Original-Msgs": str(original_count),
-                        "X-Context-Optimized-Msgs": str(len(messages)),
-                        "X-Context-Processing-Ms": f"{processing_ms:.1f}",
-                    }
+                    headers=response_headers
                 )
         except httpx.HTTPError as e:
             log.error(f"OpenRouter request failed: {e}")
