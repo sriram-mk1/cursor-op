@@ -325,15 +325,45 @@ async def chat_completions(
                     "percent_saved": optimization_result.get("percent_saved", 0)
                 }
                 
-                # Build optimized context string
+                # Build optimized context with ROLE FORMATTING
                 optimized_chunks = optimization_result.get("optimized_context", [])
-                context_parts = []
+                
+                # Group chunks by type for structured formatting
+                context_sections = {
+                    "recent_conversation": [],
+                    "relevant_context": [],
+                    "code_snippets": []
+                }
+                
                 for chunk in optimized_chunks:
                     content = chunk.get("content", "")
-                    if content:
-                        context_parts.append(content)
+                    if not content:
+                        continue
+                    
+                    # Categorize chunks
+                    if chunk.get('is_recent', False):
+                        context_sections["recent_conversation"].append(content)
+                    elif '```' in content or 'def ' in content or 'class ' in content:
+                        context_sections["code_snippets"].append(content)
+                    else:
+                        context_sections["relevant_context"].append(content)
                 
-                optimized_context = "\n\n".join(context_parts)
+                # Build structured prompt
+                formatted_context_parts = []
+                
+                if context_sections["recent_conversation"]:
+                    formatted_context_parts.append("=== RECENT CONVERSATION ===")
+                    formatted_context_parts.extend(context_sections["recent_conversation"])
+                
+                if context_sections["relevant_context"]:
+                    formatted_context_parts.append("\n=== RELEVANT CONTEXT ===")
+                    formatted_context_parts.extend(context_sections["relevant_context"])
+                
+                if context_sections["code_snippets"]:
+                    formatted_context_parts.append("\n=== CODE REFERENCES ===")
+                    formatted_context_parts.extend(context_sections["code_snippets"])
+                
+                optimized_context = "\n\n".join(formatted_context_parts)
                 
                 # Find system message position
                 system_msg_idx = None
