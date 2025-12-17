@@ -12,13 +12,10 @@ class ContextOptimizer:
         self.model = None
         try:
             from sentence_transformers import SentenceTransformer
-            from sentence_transformers import SentenceTransformer
-            # Use a smaller, quantized model to fit within 512MB RAM
-            # all-MiniLM-L6-v2 is ~80MB and very efficient
-            # Or use the static model with truncation if available
-            self.model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", device="cpu")
+            # Use minishlab/potion-base-2M as requested - extremely lightweight
+            self.model = SentenceTransformer("minishlab/potion-base-2M", device="cpu")
             self.model.max_seq_length = 256  # Limit sequence length to save memory
-            logger.info("Loaded lightweight embedding model: sentence-transformers/all-MiniLM-L6-v2")
+            logger.info("Loaded lightweight embedding model: minishlab/potion-base-2M")
         except ImportError:
             logger.warning("sentence-transformers not installed. Falling back to keyword matching.")
         except Exception as e:
