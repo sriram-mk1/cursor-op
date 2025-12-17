@@ -14,8 +14,8 @@ class ContextOptimizer:
         # Initialize embedding model with truncation
         try:
             from sentence_transformers import SentenceTransformer
-            logger.info("Loading embedding model: minishlab/potion-base-2M with 128-dim truncation...")
-            self.model = SentenceTransformer("minishlab/potion-base-2M", device="cpu", truncate_dim=128)
+            logger.info("Loading embedding model: sentence-transformers/static-retrieval-mrl-en-v1 with 128-dim truncation...")
+            self.model = SentenceTransformer("sentence-transformers/static-retrieval-mrl-en-v1", device="cpu", truncate_dim=128)
             logger.info(f"✓ Model loaded successfully. Embedding dimension: 128")
         except ImportError:
             logger.error("sentence-transformers not installed!")

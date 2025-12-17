@@ -4,7 +4,7 @@ An OpenRouter-compatible API gateway with intelligent context optimization using
 
 ## 🚀 Features
 
-- **Semantic Retrieval**: Uses `minishlab/potion-base-2M` (4MB) for efficient CPU-based similarity search
+- **Semantic Retrieval**: Uses `sentence-transformers/static-retrieval-mrl-en-v1` (4MB) for efficient CPU-based similarity search
 - **OpenRouter Compatible**: Drop-in replacement for OpenRouter API
 - **Automatic Optimization**: Intelligently shrinks conversation history based on query relevance
 - **Low Memory**: Optimized for 512MB RAM environments (Render free tier)
@@ -222,7 +222,7 @@ Savings: 68.2%
 ## 🔧 Configuration
 
 ### Embedding Model
-The system uses `minishlab/potion-base-2M` by default. To change:
+The system uses `sentence-transformers/static-retrieval-mrl-en-v1` by default. To change:
 
 ```python
 # context_optimizer/engine.py
@@ -257,7 +257,7 @@ MIT License - Use freely in your projects
 
 - Built with [sentence-transformers](https://www.sbert.net/)
 - Powered by [OpenRouter](https://openrouter.ai/)
-- Embedding model: [minishlab/potion-base-2M](https://huggingface.co/minishlab/potion-base-2M)
+- Embedding model: [sentence-transformers/static-retrieval-mrl-en-v1](https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1)
 
 ---
 

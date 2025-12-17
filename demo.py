@@ -45,7 +45,7 @@ from sentence_transformers import SentenceTransformer
 
 class ContextOptimizer:
     def __init__(self):
-        self.model = SentenceTransformer("minishlab/potion-base-2M", device="cpu", truncate_dim=128)
+        self.model = SentenceTransformer("sentence-transformers/static-retrieval-mrl-en-v1", device="cpu", truncate_dim=128)
         self.sessions = {}
     
     def ingest(self, session_id: str, events: List[Dict]):
