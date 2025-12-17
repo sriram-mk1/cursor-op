@@ -413,7 +413,7 @@ async def chat_completions(
     
     # Debug log (hide most of key for security)
     key_preview = f"{openrouter_api_key[:10]}...{openrouter_api_key[-4:]}" if len(openrouter_api_key) > 14 else "***"
-    logger.debug(f"Forwarding to OpenRouter with key: {key_preview}")
+    logger.info(f"Forwarding request to OpenRouter: {len(openrouter_request['messages'])} messages | Key: {key_preview}")
     
     # Call OpenRouter
     if request.stream:
