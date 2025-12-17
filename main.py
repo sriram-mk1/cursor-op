@@ -369,7 +369,13 @@ async def chat_completions(
                 # We strictly send ONLY:
                 # 1. System message (with injected optimized context)
                 # 2. The final user query
-                # All intermediate history is removed because it is now represented in the optimized context.
+                
+                # Find existing system message
+                system_msg_idx = None
+                for idx, msg in enumerate(messages):
+                    if msg.get("role") == "system":
+                        system_msg_idx = idx
+                        break
                 
                 final_messages = []
                 
@@ -377,24 +383,24 @@ async def chat_completions(
                 if system_msg_idx is not None:
                     # Update existing system message
                     existing_content = extract_text_content(messages[system_msg_idx].get("content", ""))
-                    messages[system_msg_idx]["content"] = (
-                        f"{existing_content}\n\n"
-                        f"[OPTIMIZED CONTEXT - PREVIOUS MESSAGES]:\n{optimized_context}"
-                    )
-                    final_messages.append(messages[system_msg_idx])
+                    final_messages.append({
+                        "role": "system",
+                        "content": f"{existing_content}\n\n[OPTIMIZED CONTEXT]:\n{optimized_context}"
+                    })
                 else:
                     # Create new system message
                     final_messages.append({
                         "role": "system",
-                        "content": f"[OPTIMIZED CONTEXT - PREVIOUS MESSAGES]:\n{optimized_context}"
+                        "content": f"[OPTIMIZED CONTEXT]:\n{optimized_context}"
                     })
                 
                 # 2. Add Last User Message (The Query)
-                # We assume the last message is the user's query. 
-                # If the last message is not user (rare), we take the last message anyway.
+                # We assume the last message is the user's query.
                 if messages:
                     last_msg = messages[-1]
-                    final_messages.append(last_msg)
+                    # Only add if it's not the system message we just processed
+                    if last_msg.get("role") != "system":
+                        final_messages.append(last_msg)
                 
                 # REPLACE the messages list completely
                 messages = final_messages
