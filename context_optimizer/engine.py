@@ -112,7 +112,7 @@ class ContextOptimizer:
         self, 
         session_id: str, 
         query_text: str, 
-        min_similarity: float = 0.35
+        min_similarity: float = 0.45
     ) -> Dict[str, Any]:
         """
         Optimize context dynamically:

@@ -176,15 +176,25 @@ def extract_api_key(authorization: str):
     return token
 
 
-def count_messages_tokens(messages: List[Dict[str, Any]]) -> int:
+def count_messages_tokens(messages: List[Dict[str, Any]], model: Optional[str] = None) -> int:
     """
-    Count total tokens in a list of messages using tiktoken (cl100k_base).
-    Includes rough estimate for message formatting overhead.
+    Count total tokens in a list of messages using tiktoken.
+    Uses model-specific encoding if available, otherwise defaults to cl100k_base.
     """
-    try:
-        encoding = tiktoken.get_encoding("cl100k_base")
-    except:
-        encoding = tiktoken.get_encoding("p50k_base")
+    encoding = None
+    if model:
+        try:
+            # Strip vendor prefix (e.g. "openai/gpt-4o" -> "gpt-4o")
+            model_name = model.split("/")[-1]
+            encoding = tiktoken.encoding_for_model(model_name)
+        except Exception:
+            pass
+            
+    if not encoding:
+        try:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        except:
+            encoding = tiktoken.get_encoding("p50k_base")
         
     num_tokens = 0
     for message in messages:
@@ -373,8 +383,8 @@ async def chat_completions(
     
     # Calculate FINAL token count after everything is constructed
     if optimization_applied:
-        final_token_count = count_messages_tokens(messages)
-        initial_token_count = count_messages_tokens(request.messages) if request.messages else original_message_count * 100 # fallback
+        final_token_count = count_messages_tokens(messages, model=request.model)
+        initial_token_count = count_messages_tokens(request.messages, model=request.model) if request.messages else original_message_count * 100 # fallback
         
         savings_pct = 0
         if initial_token_count > 0:
