@@ -352,20 +352,6 @@ async def chat_completions(
                 # Keep only the last user message after system context
                 messages = [messages[0], messages[-1]] if len(messages) > 1 else messages
                 
-                # Calculate actual final token count
-                final_token_count = count_messages_tokens(messages)
-                initial_token_count = count_messages_tokens(request.messages) if request.messages else original_message_count * 100 # fallback
-                
-                savings_pct = 0
-                if initial_token_count > 0:
-                    savings_pct = ((initial_token_count - final_token_count) / initial_token_count) * 100
-                
-                logger.info(
-                    f"Optimization: {original_message_count} msgs → {len(messages)} msgs | "
-                    f"Real Tokens: {initial_token_count} → {final_token_count} "
-                    f"({savings_pct:.1f}% saved)"
-                )
-                
                 # Debug: Verify injection
                 sys_content = extract_text_content(messages[0].get("content", ""))
                 preview = sys_content[:100].replace("\n", " ")
@@ -386,6 +372,28 @@ async def chat_completions(
     
     # Remove prompt if we converted it to messages
     openrouter_request.pop("prompt", None)
+    
+    # Calculate FINAL token count after everything is constructed
+    if optimization_applied:
+        final_token_count = count_messages_tokens(messages)
+        initial_token_count = count_messages_tokens(request.messages) if request.messages else original_message_count * 100 # fallback
+        
+        savings_pct = 0
+        if initial_token_count > 0:
+            savings_pct = ((initial_token_count - final_token_count) / initial_token_count) * 100
+        
+        logger.info(
+            f"Optimization: {original_message_count} msgs → {len(messages)} msgs | "
+            f"Real Tokens: {initial_token_count} → {final_token_count} "
+            f"({savings_pct:.1f}% saved)"
+        )
+        
+        # Update stats for headers
+        optimization_stats = {
+            "raw_tokens": initial_token_count,
+            "optimized_tokens": final_token_count,
+            "percent_saved": savings_pct
+        }
     
     # Prepare headers for OpenRouter
     headers = {
