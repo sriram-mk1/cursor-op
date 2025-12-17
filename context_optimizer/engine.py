@@ -15,27 +15,56 @@ import numpy as np
 
 log = logging.getLogger("gateway")
 
-# Lazy load embedder
+# Global model instance - initialized once at startup
 _embedder = None
 
-
-def get_embedder():
-    """Lazy load the FastEmbed embedding model."""
+def init_embedder():
+    """Initialize the FastEmbed model globally."""
     global _embedder
+    if _embedder is None:
+        try:
+            from fastembed import TextEmbedding
+            log.info("🔄 Initializing FastEmbed (BAAI/bge-small-en-v1.5)...")
+            _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+            log.info("✅ FastEmbed initialized")
+        except Exception as e:
+            log.error(f"❌ Failed to initialize FastEmbed: {e}")
+
+# Simple LRU-style cache for embeddings to save CPU/Latency
+_EMBEDDING_CACHE = {}
+MAX_CACHE_SIZE = 1000
+
+def get_embeddings(texts: List[str]) -> List[np.ndarray]:
+    """Get embeddings with simple caching."""
+    global _embedder, _EMBEDDING_CACHE
     
-    if _embedder is not None:
-        return _embedder
+    if _embedder is None:
+        init_embedder()
     
-    try:
-        from fastembed import TextEmbedding
-        log.info("🔄 Loading FastEmbed model...")
-        # all-MiniLM-L6-v2 equivalent, but ONNX (no PyTorch!)
-        _embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        log.info("✅ FastEmbed model loaded")
-        return _embedder
-    except Exception as e:
-        log.error(f"❌ Failed to load embedding model: {e}")
-        return None
+    results = []
+    to_embed = []
+    to_embed_indices = []
+    
+    for i, text in enumerate(texts):
+        if text in _EMBEDDING_CACHE:
+            results.append(_EMBEDDING_CACHE[text])
+        else:
+            results.append(None)
+            to_embed.append(text)
+            to_embed_indices.append(i)
+    
+    if to_embed:
+        embeddings = list(_embedder.embed(to_embed))
+        for i, emb in enumerate(embeddings):
+            # Cache it
+            if len(_EMBEDDING_CACHE) >= MAX_CACHE_SIZE:
+                # Simple clear if full (could be smarter but this is fast)
+                _EMBEDDING_CACHE.clear()
+            
+            _EMBEDDING_CACHE[to_embed[i]] = emb
+            results[to_embed_indices[i]] = emb
+            
+    return results
 
 
 @dataclass
@@ -47,6 +76,7 @@ class Chunk:
     chunk_index: int
     is_code: bool = False
     is_recent: bool = False
+    score: float = 0.0
     
     def __hash__(self):
         return hash((self.content, self.msg_index, self.chunk_index))
@@ -55,14 +85,11 @@ class Chunk:
 class SmartChunker:
     """
     Smart chunking that respects content structure.
-    - Code blocks stay intact
-    - Stack traces stay together
-    - Natural paragraph breaks
     """
     
     CODE_BLOCK_PATTERN = re.compile(r'```[\s\S]*?```', re.MULTILINE)
     
-    def __init__(self, target_chunk_size: int = 300):
+    def __init__(self, target_chunk_size: int = 600): # Increased for better context
         self.target_size = target_chunk_size
     
     def chunk_message(self, content: str, role: str, msg_index: int, is_recent: bool = False) -> List[Chunk]:
@@ -73,55 +100,30 @@ class SmartChunker:
         chunks = []
         chunk_idx = 0
         
-        # Extract code blocks first (preserve them intact)
+        # Extract code blocks
         code_blocks = list(self.CODE_BLOCK_PATTERN.finditer(content))
         
         last_end = 0
         for match in code_blocks:
-            # Text before code block
             before = content[last_end:match.start()].strip()
             if before:
                 for text_chunk in self._split_text(before):
-                    chunks.append(Chunk(
-                        content=text_chunk,
-                        role=role,
-                        msg_index=msg_index,
-                        chunk_index=chunk_idx,
-                        is_code=False,
-                        is_recent=is_recent
-                    ))
+                    chunks.append(Chunk(content=text_chunk, role=role, msg_index=msg_index, chunk_index=chunk_idx, is_recent=is_recent))
                     chunk_idx += 1
             
-            # Code block as single chunk
-            chunks.append(Chunk(
-                content=match.group(),
-                role=role,
-                msg_index=msg_index,
-                chunk_index=chunk_idx,
-                is_code=True,
-                is_recent=is_recent
-            ))
+            chunks.append(Chunk(content=match.group(), role=role, msg_index=msg_index, chunk_index=chunk_idx, is_code=True, is_recent=is_recent))
             chunk_idx += 1
             last_end = match.end()
         
-        # Remaining text
         remaining = content[last_end:].strip()
         if remaining:
             for text_chunk in self._split_text(remaining):
-                chunks.append(Chunk(
-                    content=text_chunk,
-                    role=role,
-                    msg_index=msg_index,
-                    chunk_index=chunk_idx,
-                    is_code=False,
-                    is_recent=is_recent
-                ))
+                chunks.append(Chunk(content=text_chunk, role=role, msg_index=msg_index, chunk_index=chunk_idx, is_recent=is_recent))
                 chunk_idx += 1
         
         return chunks
     
     def _split_text(self, text: str) -> List[str]:
-        """Split plain text into reasonable chunks."""
         if len(text) <= self.target_size:
             return [text]
         
@@ -133,93 +135,70 @@ class SmartChunker:
             if len(current) + len(para) <= self.target_size:
                 current += ("\n\n" if current else "") + para
             else:
-                if current:
-                    chunks.append(current)
+                if current: chunks.append(current)
                 current = para
         
-        if current:
-            chunks.append(current)
-        
+        if current: chunks.append(current)
         return chunks
 
 
 class HybridRetriever:
     """
     Hybrid retrieval: BM25 + FastEmbed semantic similarity.
-    Lightweight and fast (ONNX, no PyTorch).
     """
     
-    def __init__(self, bm25_weight: float = 0.3, semantic_weight: float = 0.7):
+    def __init__(self, bm25_weight: float = 0.3, semantic_weight: float = 0.7, min_score: float = 0.4):
         self.bm25_weight = bm25_weight
         self.semantic_weight = semantic_weight
+        self.min_score = min_score # Strict threshold
     
     def retrieve(self, query: str, chunks: List[Chunk], top_k: int = 10) -> List[Chunk]:
-        """Retrieve most relevant chunks."""
-        if not chunks:
-            return []
-        
-        if len(chunks) <= top_k:
-            return chunks
+        if not chunks: return []
         
         bm25_scores = self._bm25_scores(query, chunks)
         semantic_scores = self._semantic_scores(query, chunks)
         
-        final_scores = []
+        scored_chunks = []
         for i, chunk in enumerate(chunks):
             bm25 = bm25_scores[i] if bm25_scores else 0
             semantic = semantic_scores[i] if semantic_scores else 0
             
             # Boosts
-            recency_boost = 1.5 if chunk.is_recent else 1.0
-            code_boost = 1.2 if chunk.is_code else 1.0
+            recency_boost = 1.3 if chunk.is_recent else 1.0
+            code_boost = 1.1 if chunk.is_code else 1.0
             
-            score = (self.bm25_weight * bm25 + self.semantic_weight * semantic) * recency_boost * code_boost
-            final_scores.append((score, chunk))
+            chunk.score = (self.bm25_weight * bm25 + self.semantic_weight * semantic) * recency_boost * code_boost
+            
+            # Strict filtering: only keep if score is above threshold or it's very recent
+            if chunk.score >= self.min_score or chunk.is_recent:
+                scored_chunks.append(chunk)
         
-        final_scores.sort(key=lambda x: x[0], reverse=True)
-        return [chunk for _, chunk in final_scores[:top_k]]
+        scored_chunks.sort(key=lambda x: x.score, reverse=True)
+        return scored_chunks[:top_k]
     
     def _bm25_scores(self, query: str, chunks: List[Chunk]) -> List[float]:
-        """BM25 keyword matching scores."""
         try:
             from rank_bm25 import BM25Okapi
-            
             corpus = [chunk.content.lower().split() for chunk in chunks]
-            query_tokens = query.lower().split()
-            
             bm25 = BM25Okapi(corpus)
-            scores = bm25.get_scores(query_tokens)
-            
-            max_score = max(scores) if max(scores) > 0 else 1
-            return [s / max_score for s in scores]
-        except Exception as e:
-            log.warning(f"BM25 failed: {e}")
-            return [0.0] * len(chunks)
+            scores = bm25.get_scores(query.lower().split())
+            max_s = max(scores) if max(scores) > 0 else 1
+            return [s / max_s for s in scores]
+        except: return [0.0] * len(chunks)
     
     def _semantic_scores(self, query: str, chunks: List[Chunk]) -> List[float]:
-        """Semantic similarity using FastEmbed."""
-        embedder = get_embedder()
-        if embedder is None:
-            return [0.0] * len(chunks)
-        
         try:
-            # FastEmbed returns generators, convert to lists
-            query_emb = list(embedder.embed([query]))[0]
-            chunk_texts = [chunk.content for chunk in chunks]
-            chunk_embs = list(embedder.embed(chunk_texts))
+            # Use cached embeddings
+            query_emb = get_embeddings([query])[0]
+            chunk_embs = get_embeddings([c.content for c in chunks])
             
-            # Cosine similarity
             query_norm = query_emb / np.linalg.norm(query_emb)
             similarities = []
             for emb in chunk_embs:
-                emb_norm = emb / np.linalg.norm(emb)
-                sim = np.dot(query_norm, emb_norm)
+                sim = np.dot(query_norm, emb / np.linalg.norm(emb))
                 similarities.append(float(sim))
-            
             return similarities
-        except Exception as e:
-            log.warning(f"Semantic retrieval failed: {e}")
-            return [0.0] * len(chunks)
+        except: return [0.0] * len(chunks)
 
 
 class ContextOptimizer:

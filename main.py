@@ -1,26 +1,18 @@
-"""
-Context Optimizer Gateway
-=========================
-OpenRouter-compatible proxy with intelligent context optimization.
-
-Features:
-- Smart chunking (respects code blocks, logs)
-- Hybrid retrieval (BM25 + semantic embeddings)
-- Real analytics from OpenRouter
-"""
-
 import os
 import time
 import logging
+import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
+from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from context_optimizer import ContextOptimizer
+from context_optimizer.engine import init_embedder
 
 
 # ============================================================================
@@ -64,10 +56,19 @@ log = setup_logging()
 
 
 # ============================================================================
-# OPTIMIZER
+# LIFESPAN & OPTIMIZER
 # ============================================================================
 
-optimizer = ContextOptimizer(max_context_chunks=15)
+optimizer = ContextOptimizer(max_context_chunks=10)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown logic."""
+    log.info("🚀 Starting Gateway...")
+    # Pre-load the embedding model to avoid first-request latency
+    init_embedder()
+    yield
+    log.info("🛑 Shutting down Gateway...")
 
 
 # ============================================================================
@@ -87,7 +88,7 @@ class ChatCompletionRequest(BaseModel):
     transforms: Optional[List[str]] = None
     route: Optional[str] = None
     
-    # Our param
+    # Our params
     enable_optimization: Optional[bool] = True
     debug: Optional[bool] = False
 
@@ -98,8 +99,9 @@ class ChatCompletionRequest(BaseModel):
 
 app = FastAPI(
     title="Context Optimizer Gateway",
-    version="3.0.0",
-    description="OpenRouter proxy with RAG-based context optimization"
+    version="3.2.0",
+    description="Optimized OpenRouter proxy with RAG-based context optimization",
+    lifespan=lifespan
 )
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
@@ -114,10 +116,41 @@ def extract_api_key(authorization: str) -> str:
     return auth
 
 
+async def fetch_and_log_analytics(generation_id: str, api_key: str):
+    """Background task to fetch real analytics without blocking the user."""
+    if not generation_id:
+        return
+        
+    try:
+        # Wait a tiny bit for OpenRouter to process the generation
+        await asyncio.sleep(1.0)
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            usage_response = await client.get(
+                f"{OPENROUTER_API_BASE}/generation",
+                params={"id": generation_id},
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+            
+            if usage_response.status_code == 200:
+                usage_data = usage_response.json().get("data", {})
+                
+                prompt_tokens = usage_data.get("tokens_prompt", 0)
+                completion_tokens = usage_data.get("tokens_completion", 0)
+                total = prompt_tokens + completion_tokens
+                cost = usage_data.get("total_cost", 0)
+                model = usage_data.get("model", "unknown")
+                
+                log.info(f"📊 REAL USAGE (Async): {model} | {total:,} tokens | ${cost:.6f}")
+    except Exception as e:
+        log.debug(f"Could not fetch async analytics: {e}")
+
+
 @app.post("/v1/chat/completions")
 @app.post("/api/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
+    background_tasks: BackgroundTasks,
     authorization: Optional[str] = Header(None, alias="authorization"),
     http_referer: Optional[str] = Header(None, alias="http-referer"),
     x_title: Optional[str] = Header(None, alias="x-title"),
@@ -126,72 +159,72 @@ async def chat_completions(
     start_time = time.time()
     request_id = f"req_{int(time.time() * 1000)}"
     
-    api_key = extract_api_key(authorization)
-    
-    if not request.messages and not request.prompt:
-        raise HTTPException(status_code=400, detail="Either 'messages' or 'prompt' is required")
-    
-    # Convert prompt to messages
-    if request.prompt and not request.messages:
-        request.messages = [{"role": "user", "content": request.prompt}]
-    
-    # Normalize messages
-    messages = []
-    for msg in request.messages:
-        if isinstance(msg, dict):
-            messages.append(msg)
-        elif hasattr(msg, 'model_dump'):
-            messages.append(msg.model_dump(exclude_none=True))
-        elif hasattr(msg, 'dict'):
-            messages.append(msg.dict(exclude_none=True))
-        else:
-            messages.append({"role": "user", "content": str(msg)})
-    
-    original_count = len(messages)
-    
-    # ========================================================================
-    # CONTEXT OPTIMIZATION
-    # ========================================================================
-    if request.enable_optimization and len(messages) > 3:
-        messages = optimizer.optimize(messages)
-    
-    # Build request
-    request_dict = request.model_dump(exclude_none=True)
-    request_dict.pop("enable_optimization", None)
-    request_dict.pop("debug", None)
-    request_dict["messages"] = messages
-    request_dict.pop("prompt", None)
-    
-    processing_ms = (time.time() - start_time) * 1000
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": http_referer or "https://context-optimizer.app",
-        "X-Title": x_title or "Context Optimizer Gateway"
-    }
-    
-    log.info(f"🚀 Forwarding to OpenRouter ({original_count} → {len(messages)} msgs, {processing_ms:.1f}ms)")
-    
-    if request.stream:
-        async def generate():
-            try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    async with client.stream(
-                        "POST",
-                        f"{OPENROUTER_API_BASE}/chat/completions",
-                        json=request_dict,
-                        headers=headers
-                    ) as response:
-                        async for chunk in response.aiter_bytes():
-                            yield chunk
-            except Exception as e:
-                log.error(f"Streaming error: {e}")
-                yield f'data: {{"error": "{str(e)}"}}\n\n'.encode()
+    try:
+        api_key = extract_api_key(authorization)
         
-        return StreamingResponse(generate(), media_type="text/event-stream")
-    else:
-        try:
+        if not request.messages and not request.prompt:
+            raise HTTPException(status_code=400, detail="Either 'messages' or 'prompt' is required")
+        
+        # Convert prompt to messages
+        if request.prompt and not request.messages:
+            request.messages = [{"role": "user", "content": request.prompt}]
+        
+        # Normalize messages
+        messages = []
+        for msg in request.messages:
+            if isinstance(msg, dict):
+                messages.append(msg)
+            elif hasattr(msg, 'model_dump'):
+                messages.append(msg.model_dump(exclude_none=True))
+            elif hasattr(msg, 'dict'):
+                messages.append(msg.dict(exclude_none=True))
+            else:
+                messages.append({"role": "user", "content": str(msg)})
+        
+        original_count = len(messages)
+        
+        # ========================================================================
+        # CONTEXT OPTIMIZATION
+        # ========================================================================
+        if request.enable_optimization and len(messages) > 3:
+            messages = optimizer.optimize(messages)
+        
+        # Build request
+        request_dict = request.model_dump(exclude_none=True)
+        request_dict.pop("enable_optimization", None)
+        request_dict.pop("debug", None)
+        request_dict["messages"] = messages
+        request_dict.pop("prompt", None)
+        
+        processing_ms = (time.time() - start_time) * 1000
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": http_referer or "https://context-optimizer.app",
+            "X-Title": x_title or "Context Optimizer Gateway"
+        }
+        
+        log.info(f"🚀 Forwarding ({original_count} → {len(messages)} msgs, {processing_ms:.1f}ms)")
+        
+        if request.stream:
+            async def generate():
+                try:
+                    async with httpx.AsyncClient(timeout=120.0) as client:
+                        async with client.stream(
+                            "POST",
+                            f"{OPENROUTER_API_BASE}/chat/completions",
+                            json=request_dict,
+                            headers=headers
+                        ) as response:
+                            async for chunk in response.aiter_bytes():
+                                yield chunk
+                except Exception as e:
+                    log.error(f"Streaming error: {e}")
+                    yield f'data: {{"error": "{str(e)}"}}\n\n'.encode()
+            
+            return StreamingResponse(generate(), media_type="text/event-stream")
+        else:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{OPENROUTER_API_BASE}/chat/completions",
@@ -204,42 +237,10 @@ async def chat_completions(
                 if response.status_code != 200:
                     log.error(f"OpenRouter error {response.status_code}: {response.text[:200]}")
                 else:
-                    # ================================================================
-                    # LOG REAL ANALYTICS FROM OPENROUTER
-                    # ================================================================
+                    # Queue analytics fetch in background
                     generation_id = response_data.get("id")
-                    
                     if generation_id:
-                        try:
-                            usage_response = await client.get(
-                                f"{OPENROUTER_API_BASE}/generation",
-                                params={"id": generation_id},
-                                headers={"Authorization": f"Bearer {api_key}"}
-                            )
-                            
-                            if usage_response.status_code == 200:
-                                usage_data = usage_response.json().get("data", {})
-                                
-                                prompt_tokens = usage_data.get("tokens_prompt", 0)
-                                completion_tokens = usage_data.get("tokens_completion", 0)
-                                total = prompt_tokens + completion_tokens
-                                cost = usage_data.get("total_cost", 0)
-                                model = usage_data.get("model", "unknown")
-                                
-                                log.info(f"📊 REAL USAGE:")
-                                log.info(f"   Model: {model}")
-                                log.info(f"   Prompt: {prompt_tokens:,} tokens")
-                                log.info(f"   Completion: {completion_tokens:,} tokens")
-                                log.info(f"   Total: {total:,} tokens")
-                                log.info(f"   Cost: ${cost:.6f}")
-                        except Exception as e:
-                            log.warning(f"Could not fetch analytics: {e}")
-                    
-                    # Also check inline usage
-                    usage = response_data.get("usage", {})
-                    if usage and not generation_id:
-                        log.info(f"📈 Usage: prompt={usage.get('prompt_tokens', 0):,}, "
-                                f"completion={usage.get('completion_tokens', 0):,}")
+                        background_tasks.add_task(fetch_and_log_analytics, generation_id, api_key)
                 
                 # Add our headers
                 response_headers = {
@@ -262,9 +263,11 @@ async def chat_completions(
                     status_code=response.status_code,
                     headers=response_headers
                 )
-        except httpx.HTTPError as e:
-            log.error(f"OpenRouter request failed: {e}")
-            raise HTTPException(status_code=502, detail=f"Failed to reach OpenRouter: {str(e)}")
+    except Exception as e:
+        log.error(f"💥 Server Error: {e}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Internal Gateway Error: {str(e)}")
 
 
 # ============================================================================
@@ -274,25 +277,31 @@ async def chat_completions(
 @app.get("/v1/models")
 @app.get("/api/v1/models")
 async def list_models(authorization: Optional[str] = Header(None)):
-    api_key = extract_api_key(authorization)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{OPENROUTER_API_BASE}/models",
-            headers={"Authorization": f"Bearer {api_key}"}
-        )
-        return JSONResponse(content=response.json(), status_code=response.status_code)
+    try:
+        api_key = extract_api_key(authorization)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{OPENROUTER_API_BASE}/models",
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+            return JSONResponse(content=response.json(), status_code=response.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/v1/models/{model_id:path}")
 @app.get("/api/v1/models/{model_id:path}")
 async def get_model(model_id: str, authorization: Optional[str] = Header(None)):
-    api_key = extract_api_key(authorization)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{OPENROUTER_API_BASE}/models/{model_id}",
-            headers={"Authorization": f"Bearer {api_key}"}
-        )
-        return JSONResponse(content=response.json(), status_code=response.status_code)
+    try:
+        api_key = extract_api_key(authorization)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{OPENROUTER_API_BASE}/models/{model_id}",
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+            return JSONResponse(content=response.json(), status_code=response.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -307,16 +316,18 @@ async def get_activity(
     authorization: Optional[str] = Header(None)
 ):
     """Get real usage analytics from OpenRouter."""
-    api_key = extract_api_key(authorization)
-    
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        params = {"date": date} if date else {}
-        response = await client.get(
-            f"{OPENROUTER_API_BASE}/activity",
-            params=params,
-            headers={"Authorization": f"Bearer {api_key}"}
-        )
-        return JSONResponse(content=response.json(), status_code=response.status_code)
+    try:
+        api_key = extract_api_key(authorization)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            params = {"date": date} if date else {}
+            response = await client.get(
+                f"{OPENROUTER_API_BASE}/activity",
+                params=params,
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+            return JSONResponse(content=response.json(), status_code=response.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -327,9 +338,9 @@ async def get_activity(
 async def health():
     return {
         "status": "healthy",
-        "version": "3.0.0",
-        "requests": optimizer.request_count,
-        "features": ["smart_chunking", "bm25", "semantic_embeddings"]
+        "version": "3.2.0",
+        "uptime_seconds": int(time.time() - app.state.start_time) if hasattr(app.state, 'start_time') else 0,
+        "features": ["smart_chunking", "bm25", "semantic_embeddings", "caching", "async_analytics"]
     }
 
 
@@ -337,17 +348,12 @@ async def health():
 async def root():
     return {
         "service": "Context Optimizer Gateway",
-        "version": "3.0.0",
+        "version": "3.2.0",
         "optimization": {
-            "chunking": "Smart (respects code blocks)",
-            "retrieval": "Hybrid (BM25 + MiniLM-L6-v2)",
-            "max_chunks": 15
-        },
-        "endpoints": {
-            "chat": "/v1/chat/completions",
-            "models": "/v1/models",
-            "activity": "/activity",
-            "health": "/health"
+            "chunking": "Smart (target 600 chars)",
+            "retrieval": "Hybrid (BM25 + Semantic)",
+            "min_score": 0.4,
+            "caching": "LRU (1000 items)"
         }
     }
 
@@ -358,14 +364,7 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    
+    app.state.start_time = time.time()
     port = int(os.getenv("PORT", "8000"))
-    
-    log.info("=" * 60)
-    log.info("🚀 Context Optimizer Gateway v3.0.0")
-    log.info("=" * 60)
-    log.info(f"📍 Port: {port}")
-    log.info("📦 Features: Smart Chunking | BM25 | Semantic Embeddings")
-    log.info("=" * 60)
-    
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, workers=1)
+
