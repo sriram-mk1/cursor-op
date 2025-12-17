@@ -300,16 +300,15 @@ async def chat_completions(
             query_text = extract_text_content(latest_msg.get("content", ""))
             
             # Optimize context
-            optimization_result = optimizer.optimize(
+            result = optimizer.optimize(
                 session_id,
                 query_text,
-                max_chunks=request.max_chunks or 12,
-                target_token_budget=request.target_token_budget,
+                target_token_budget=request.target_token_budget or 2000,
                 cache_ttl_sec=300
             )
             
             # Apply optimization if we got useful results
-            if optimization_result.get("optimized_context"):
+            if result.get("optimized_context"):
                 optimization_applied = True
                 optimization_stats = {
                     "raw_tokens": optimization_result.get("raw_token_est", 0),
