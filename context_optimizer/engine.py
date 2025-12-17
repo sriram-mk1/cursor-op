@@ -158,23 +158,12 @@ class ContextOptimizer:
         # STEP 2: DYNAMIC SELECTION
         selected_chunks = []
         current_tokens = 0
-        min_chunks = 5  # Always try to keep at least this many chunks
         
-        # First pass: Filter by similarity
-        high_quality_chunks = []
         for score, chunk in scored_chunks:
-            if score >= min_similarity:
-                high_quality_chunks.append(chunk)
-        
-        # If we don't have enough high-quality chunks, fill up with the next best ones
-        if len(high_quality_chunks) < min_chunks:
-            # Get the top N chunks regardless of threshold
-            initial_selection = [chunk for _, chunk in scored_chunks[:min_chunks]]
-        else:
-            initial_selection = high_quality_chunks
-
-        # Second pass: Apply budget constraint
-        for chunk in initial_selection:
+            # 1. Similarity Check - Primary filter for relevance
+            if score < min_similarity:
+                continue
+                
             # 2. Budget Check - Soft limit (only skip if WAY over budget, e.g. > 2x)
             if target_token_budget and current_tokens > target_token_budget * 2:
                 logger.info(f"  Stopping selection: exceeded 2x budget ({current_tokens} > {target_token_budget*2})")
