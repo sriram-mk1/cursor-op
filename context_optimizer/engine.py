@@ -183,8 +183,8 @@ class ContextOptimizer:
         # Calculate similarity threshold - only keep chunks that are truly relevant
         if scored_chunks:
             top_score = scored_chunks[0][0]
-            # Adaptive threshold: at least 70% of top score, or absolute minimum of 0.3
-            similarity_threshold = max(0.3, top_score * 0.7)
+            # Adaptive threshold: at least 60% of top score, or absolute minimum of 0.2
+            similarity_threshold = max(0.2, top_score * 0.6)
             logger.info(f"Similarity threshold: {similarity_threshold:.4f} (top score: {top_score:.4f})")
         else:
             similarity_threshold = 0.0
