@@ -112,15 +112,15 @@ class ContextOptimizer:
         self, 
         session_id: str, 
         query_text: str, 
-        target_token_budget: int = 2000,
         min_similarity: float = 0.35
     ) -> Dict[str, Any]:
         """
         Optimize context dynamically:
         1. Retrieve chunks sorted by relevance
         2. Keep ALL chunks above min_similarity threshold
-        3. Fill up to target_token_budget
         """
+        logger.info(f"Session: {session_id} | Query: '{query_text}' | Min Similarity: {min_similarity}")
+        
         all_chunks = self.sessions.get(session_id, [])
         if not all_chunks:
             return {"optimized_context": [], "original_tokens": 0, "optimized_tokens": 0, "percent_saved": 0}
@@ -158,11 +158,6 @@ class ContextOptimizer:
             # 1. Similarity Check - Primary filter for relevance
             if score < min_similarity:
                 continue
-                
-            # 2. Budget Check - Soft limit (only skip if WAY over budget, e.g. > 2x)
-            if target_token_budget and current_tokens > target_token_budget * 2:
-                logger.info(f"  Stopping selection: exceeded 2x budget ({current_tokens} > {target_token_budget*2})")
-                break
                 
             selected_chunks.append(chunk)
             current_tokens += chunk['tokens']

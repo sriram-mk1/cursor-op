@@ -303,8 +303,7 @@ async def chat_completions(
             # Optimize context
             optimization_result = optimizer.optimize(
                 session_id,
-                query_text,
-                target_token_budget=request.target_token_budget or 100000  # Default to high budget, rely on similarity
+                query_text
             )
             
             # Apply optimization if we got useful results

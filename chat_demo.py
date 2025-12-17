@@ -92,11 +92,9 @@ async def chat_loop(optimizer: ContextOptimizer):
                 
                 start_opt = time.time()
                 
-                # Optimize context
                 optimization_result = optimizer.optimize(
                     session_id=SESSION_ID,
-                    query_text=user_input,
-                    target_token_budget=2000
+                    query_text=user_input
                 )
                 
                 opt_duration = time.time() - start_opt
