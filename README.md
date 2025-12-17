@@ -32,8 +32,9 @@ Server runs on `http://localhost:8000`
 1. Fork this repository
 2. Create a new project on Railway
 3. Connect your GitHub repository
-4. Railway will automatically detect `requirements.txt` and the `Procfile`
-5. The service will be deployed automatically
+4. Railway will automatically detect the `Dockerfile` and build the service
+5. The service will be deployed automatically (using CPU-optimized PyTorch)
+
 
 
 
