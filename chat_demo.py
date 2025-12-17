@@ -86,80 +86,116 @@ async def chat_loop(optimizer: ContextOptimizer):
                 if not user_input:
                     continue
                 
-                # 1. Optimize Context
+                # --- 1. OPTIMIZED REQUEST ---
                 print(f"\n{'─'*60}")
-                print("🧠 OPTIMIZING CONTEXT...")
+                print("🚀 RUN 1: OPTIMIZED REQUEST")
                 
                 start_opt = time.time()
                 
-                # We optimize based on the user's query against the ingested codebase
+                # Optimize context
                 optimization_result = optimizer.optimize(
                     session_id=SESSION_ID,
                     query_text=user_input,
-                    target_token_budget=2000 # Keep context under 2k tokens
+                    target_token_budget=2000
                 )
                 
                 opt_duration = time.time() - start_opt
                 
-                # Display Optimization Stats
+                # Stats
                 orig_tokens = optimization_result['original_tokens']
                 opt_tokens = optimization_result['optimized_tokens']
                 savings = optimization_result['percent_saved']
                 
-                print(f"   ⏱️  Time: {opt_duration:.3f}s")
-                print(f"   📉 Reduction: {orig_tokens} → {opt_tokens} tokens ({savings:.1f}% saved)")
+                print(f"   ⏱️  Optimization Time: {opt_duration:.3f}s")
+                print(f"   📉 Context Reduction: {orig_tokens} → {opt_tokens} tokens ({savings:.1f}% saved)")
                 print(f"   📑 Selected Chunks: {len(optimization_result['optimized_context'])}")
                 
-                # Show what chunks were selected (briefly)
-                print("   🔍 Top Relevant Content:")
-                for i, chunk in enumerate(optimization_result['optimized_context'][:3]):
-                    preview = chunk['content'].replace('\n', ' ')[:80]
-                    print(f"      {i+1}. {preview}...")
-                print(f"{'─'*60}\n")
-
-                # 2. Construct Prompt
-                # System prompt gets the optimized context
-                system_content = "You are a helpful AI assistant answering questions about a codebase.\n"
-                system_content += "Use the following context to answer the user's question:\n\n"
-                
+                # Build Optimized Prompt
+                system_content_opt = "You are a helpful AI assistant answering questions about a codebase.\n"
+                system_content_opt += "Use the following context to answer the user's question:\n\n"
                 for chunk in optimization_result['optimized_context']:
-                    system_content += f"---\n{chunk['content']}\n"
+                    system_content_opt += f"---\n{chunk['content']}\n"
                 
-                messages = [
-                    {"role": "system", "content": system_content},
-                ]
-                
-                # Add recent conversation history (last 2 turns) for continuity
-                messages.extend(conversation_history[-4:]) 
-                messages.append({"role": "user", "content": user_input})
+                messages_opt = [{"role": "system", "content": system_content_opt}]
+                messages_opt.extend(conversation_history[-4:]) 
+                messages_opt.append({"role": "user", "content": user_input})
 
-                # 3. Call LLM
-                print("🤖 Assistant: ", end="", flush=True)
-                
-                response = await client.post(
+                # Call LLM (Optimized)
+                print("   🤖 Calling LLM (Optimized)... ", end="", flush=True)
+                start_llm_opt = time.time()
+                response_opt = await client.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                         "HTTP-Referer": "http://localhost:8000",
                         "X-Title": "Context Optimizer Demo"
                     },
-                    json={
-                        "model": MODEL,
-                        "messages": messages,
-                        "stream": False # Simple non-streaming for now to keep code clean
-                    }
+                    json={"model": MODEL, "messages": messages_opt, "stream": False}
                 )
+                llm_duration_opt = time.time() - start_llm_opt
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    answer = data['choices'][0]['message']['content']
-                    print(answer)
-                    
-                    # Update history
-                    conversation_history.append({"role": "user", "content": user_input})
-                    conversation_history.append({"role": "assistant", "content": answer})
+                if response_opt.status_code == 200:
+                    answer_opt = response_opt.json()['choices'][0]['message']['content']
+                    print(f"Done ({llm_duration_opt:.2f}s)")
                 else:
-                    print(f"❌ API Error: {response.status_code} - {response.text}")
+                    print(f"Error: {response_opt.status_code}")
+                    answer_opt = "Error"
+
+                # --- 2. UNOPTIMIZED REQUEST (BASELINE) ---
+                print(f"\n{'─'*60}")
+                print("🐢 RUN 2: UNOPTIMIZED REQUEST (Full Context)")
+                
+                # Build Unoptimized Prompt (All chunks)
+                all_chunks = optimizer.sessions.get(SESSION_ID, [])
+                system_content_full = "You are a helpful AI assistant answering questions about a codebase.\n"
+                system_content_full += "Use the following context to answer the user's question:\n\n"
+                for chunk in all_chunks:
+                    system_content_full += f"---\n{chunk['content']}\n"
+                
+                messages_full = [{"role": "system", "content": system_content_full}]
+                messages_full.extend(conversation_history[-4:])
+                messages_full.append({"role": "user", "content": user_input})
+                
+                full_tokens = count_tokens(system_content_full)
+                print(f"   📦 Full Context Size: {full_tokens:,} tokens")
+
+                # Call LLM (Unoptimized)
+                print("   🤖 Calling LLM (Full)... ", end="", flush=True)
+                start_llm_full = time.time()
+                response_full = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "http://localhost:8000",
+                        "X-Title": "Context Optimizer Demo"
+                    },
+                    json={"model": MODEL, "messages": messages_full, "stream": False}
+                )
+                llm_duration_full = time.time() - start_llm_full
+                
+                if response_full.status_code == 200:
+                    answer_full = response_full.json()['choices'][0]['message']['content']
+                    print(f"Done ({llm_duration_full:.2f}s)")
+                else:
+                    print(f"Error: {response_full.status_code}")
+                    answer_full = "Error"
+
+                # --- COMPARISON SUMMARY ---
+                print(f"\n{'='*60}")
+                print("📊 COMPARISON SUMMARY")
+                print(f"{'='*60}")
+                print(f"Metric          | Optimized      | Unoptimized")
+                print(f"----------------|----------------|----------------")
+                print(f"Input Tokens    | {opt_tokens:<14,} | {full_tokens:<14,}")
+                print(f"LLM Latency     | {llm_duration_opt:<13.2f}s | {llm_duration_full:<13.2f}s")
+                print(f"Total Time      | {opt_duration + llm_duration_opt:<13.2f}s | {llm_duration_full:<13.2f}s")
+                print(f"{'='*60}\n")
+                
+                print(f"💡 Optimized Answer:\n{answer_opt}\n")
+                
+                # Update history with optimized answer
+                conversation_history.append({"role": "user", "content": user_input})
+                conversation_history.append({"role": "assistant", "content": answer_opt})
 
             except KeyboardInterrupt:
                 break
