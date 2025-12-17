@@ -48,7 +48,7 @@ Simply change your base URL:
 import openai
 
 client = openai.OpenAI(
-    base_url="https://your-app.onrender.com/v1",
+    base_url="https://cursor-op.up.railway.app/v1",
     api_key="YOUR_OPENROUTER_API_KEY"
 )
 
@@ -81,7 +81,7 @@ response = client.chat.completions.create(
 ### cURL Example
 
 ```bash
-curl -X POST https://your-app.onrender.com/v1/chat/completions \
+curl -X POST https://cursor-op.up.railway.app/v1/chat/completions \
   -H "Authorization: Bearer YOUR_OPENROUTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{

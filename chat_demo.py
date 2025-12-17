@@ -127,7 +127,7 @@ async def chat_loop(optimizer: ContextOptimizer):
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "http://localhost:8000",
+                        "HTTP-Referer": "https://cursor-op.up.railway.app",
                         "X-Title": "Context Optimizer Demo"
                     },
                     json={"model": MODEL, "messages": messages_opt, "stream": False}
@@ -166,7 +166,7 @@ async def chat_loop(optimizer: ContextOptimizer):
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
                         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "http://localhost:8000",
+                        "HTTP-Referer": "https://cursor-op.up.railway.app",
                         "X-Title": "Context Optimizer Demo"
                     },
                     json={"model": MODEL, "messages": messages_full, "stream": False}

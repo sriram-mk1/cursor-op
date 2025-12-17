@@ -398,7 +398,7 @@ async def chat_completions(
     headers = {
         "Authorization": f"Bearer {openrouter_api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": http_referer or "https://cursor-op.onrender.com",
+        "HTTP-Referer": http_referer or "https://cursor-op.up.railway.app",
         "X-Title": x_title or "Context Optimizer Gateway"
     }
     
