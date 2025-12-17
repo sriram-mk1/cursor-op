@@ -18,7 +18,7 @@ logger = logging.getLogger("chat-demo")
 
 # Configuration
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-MODEL = "openai/gpt-4o-mini"  # Fast and cheap for demo
+MODEL = "openai/gpt-oss-20b:free"  # Fast and cheap for demo
 SESSION_ID = "demo-session-1"
 
 if not OPENROUTER_API_KEY:
