@@ -1,217 +1,159 @@
-import time
 import logging
-import re
-from typing import List, Dict, Any, Optional, Tuple
+import time
+from typing import List, Dict, Any, Optional
 import tiktoken
-from rank_bm25 import BM25Okapi
+from collections import defaultdict
 
-# Configure logging
 logger = logging.getLogger("context-optimizer")
-logger.setLevel(logging.INFO)
 
 class ContextOptimizer:
-    """
-    A lightweight, in-memory RAG system using BM25 for relevance scoring.
-    
-    Features:
-    - Zero heavy dependencies (no torch/transformers).
-    - Extremely fast (< 10ms retrieval).
-    - Session-based in-memory storage.
-    - Token-aware context shrinking.
-    """
-
     def __init__(self):
-        """
-        Initialize the ContextOptimizer.
-        """
-        logger.info("Initializing ContextOptimizer (BM25 Engine)...")
-        
-        # In-memory storage: session_id -> List[Dict]
-        self.sessions: Dict[str, List[Dict[str, Any]]] = {}
-        
-        # Initialize Tokenizer
-        # Using cl100k_base (GPT-4) as a standard reference.
+        self.sessions = defaultdict(list)
+        self.model = None
         try:
-            self.tokenizer = tiktoken.get_encoding("cl100k_base")
-        except:
-            # Fallback if cl100k_base not found (rare)
-            self.tokenizer = tiktoken.get_encoding("p50k_base")
-            
-        logger.info("ContextOptimizer initialized successfully.")
+            from sentence_transformers import SentenceTransformer
+            # Use the model mentioned by the user for efficient retrieval
+            self.model = SentenceTransformer("sentence-transformers/static-retrieval-mrl-en-v1", device="cpu")
+            logger.info("Loaded static embedding model: sentence-transformers/static-retrieval-mrl-en-v1")
+        except ImportError:
+            logger.warning("sentence-transformers not installed. Falling back to keyword matching.")
+        except Exception as e:
+            logger.warning(f"Failed to load static embedding model: {e}. Falling back to keyword matching.")
 
-    def _tokenize(self, text: str) -> List[str]:
-        """
-        Simple tokenizer for BM25. 
-        Splits on whitespace and removes non-alphanumeric chars.
-        """
-        text = text.lower()
-        # Keep only alphanumeric and spaces
-        text = re.sub(r'[^a-z0-9\s]', ' ', text)
-        return text.split()
+    def ingest(self, session_id: str, events: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Ingest events into the session history."""
+        new_count = 0
+        for event in events:
+            # Simple deduplication: check if content already exists in session
+            # In a real system, use SimHash or vector similarity
+            if not any(e.get('content') == event.get('content') for e in self.sessions[session_id]):
+                self.sessions[session_id].append(event)
+                new_count += 1
+        
+        return {"ingested": new_count, "deduped": len(events) - new_count}
 
-    def _count_tokens(self, text: str) -> int:
-        """Count tokens in a text string using tiktoken."""
-        return len(self.tokenizer.encode(text))
+    def get_stats(self, session_id: str) -> Dict[str, Any]:
+        chunks = self.sessions.get(session_id, [])
+        return {
+            "chunks": len(chunks),
+            "index_terms": 0, 
+            "dedup_rate": 0.0 
+        }
 
-    def _chunk_text(self, text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
-        """
-        Split text into overlapping chunks.
-        """
-        tokens = self.tokenizer.encode(text)
-        if len(tokens) <= chunk_size:
-            return [text]
+    def optimize(self, session_id: str, query_text: str, max_chunks: int = 12, target_token_budget: Optional[int] = None, cache_ttl_sec: int = 300) -> Dict[str, Any]:
+        """Optimize context by selecting relevant chunks and shrinking them."""
         
-        chunks = []
-        start = 0
-        while start < len(tokens):
-            end = min(start + chunk_size, len(tokens))
-            chunk_tokens = tokens[start:end]
-            chunks.append(self.tokenizer.decode(chunk_tokens))
-            
-            if end == len(tokens):
-                break
-            
-            start += chunk_size - overlap
-            
-        return chunks
+        all_chunks = self.sessions.get(session_id, [])
+        if not all_chunks:
+            return {}
 
-    def ingest(self, session_id: str, events: List[Dict[str, Any]]):
-        """
-        Ingest conversation events into memory.
+        # Log BEFORE context
+        logger.info(f"--- OPTIMIZATION START for Session {session_id} ---")
+        logger.info(f"Query: {query_text}")
+        logger.info(f"Total available chunks: {len(all_chunks)}")
         
-        Args:
-            session_id: Unique identifier for the conversation session.
-            events: List of message dictionaries (role, content, etc.).
-        """
-        # Initialize session if not exists
-        if session_id not in self.sessions:
-            self.sessions[session_id] = []
-            
-        # We'll rebuild the session data for simplicity in this "all in session" model.
-        # In a real app, you might append, but here we want to ensure we have the latest state.
-        # If the user passes the full history every time, we should clear and re-ingest 
-        # OR handle deduplication.
-        # For this implementation, we'll assume 'events' contains new or full history.
-        # Let's just append new ones? 
-        # The prompt implies "reset the project... except main.py".
-        # The main.py calls ingest with "history except last message".
-        # So we should probably clear and re-ingest to be safe and stateless-ish, 
-        # or check for duplicates.
-        # Let's clear for now to guarantee "fresh" context for the request.
-        self.sessions[session_id] = []
-        
-        for i, event in enumerate(events):
-            content = event.get("content", "")
-            role = event.get("role", "user")
-            timestamp = event.get("ts", time.time())
-            
-            if not content:
-                continue
-                
-            chunks = self._chunk_text(content)
-            
-            for chunk in chunks:
-                self.sessions[session_id].append({
-                    "content": chunk,
-                    "role": role,
-                    "timestamp": timestamp,
-                    "original_index": i,
-                    "token_count": self._count_tokens(chunk),
-                    "tokenized_text": self._tokenize(chunk) # Pre-compute for BM25
-                })
-
-    def optimize(self, 
-                 session_id: str, 
-                 query_text: str, 
-                 max_chunks: int = 10, 
-                 target_token_budget: Optional[int] = None, 
-                 cache_ttl_sec: int = 300) -> Dict[str, Any]:
-        """
-        Retrieve and optimize context using BM25.
-        """
-        start_time = time.time()
-        
-        if session_id not in self.sessions or not self.sessions[session_id]:
-            return {
-                "optimized_context": [],
-                "raw_token_est": 0,
-                "optimized_token_est": 0,
-                "percent_saved_est": 0.0
-            }
-            
-        session_chunks = self.sessions[session_id]
-        
-        # 1. Calculate Raw Tokens (Total history size)
-        raw_tokens = sum(chunk["token_count"] for chunk in session_chunks)
-        
-        # 2. Prepare BM25
-        tokenized_corpus = [chunk["tokenized_text"] for chunk in session_chunks]
-        bm25 = BM25Okapi(tokenized_corpus)
-        
-        # 3. Query BM25
-        tokenized_query = self._tokenize(query_text)
-        doc_scores = bm25.get_scores(tokenized_query)
-        
-        # 4. Rank Chunks
-        # Zip scores with chunks
+        # 1. Retrieval / Ranking
         scored_chunks = []
-        for i, score in enumerate(doc_scores):
-            # We can add a small boost for recency?
-            # Let's keep it simple: Pure relevance first.
-            scored_chunks.append({
-                "chunk": session_chunks[i],
-                "score": score,
-                "index": i
-            })
-            
+        if self.model:
+            try:
+                query_embedding = self.model.encode(query_text)
+                # Encode all chunks 
+                chunk_texts = [chunk.get('content', '') for chunk in all_chunks]
+                chunk_embeddings = self.model.encode(chunk_texts)
+                
+                similarities = self.model.similarity(query_embedding, chunk_embeddings)
+                
+                for i, chunk in enumerate(all_chunks):
+                    score = similarities[0][i].item()
+                    scored_chunks.append((score, chunk))
+                
+                logger.info("Used static embeddings for retrieval.")
+            except Exception as e:
+                logger.error(f"Embedding retrieval failed: {e}")
+                # Fallback to recent chunks
+                for i, chunk in enumerate(all_chunks):
+                    scored_chunks.append((i, chunk)) 
+        else:
+            # Fallback: just use recency
+            for i, chunk in enumerate(all_chunks):
+                scored_chunks.append((i, chunk))
+
         # Sort by score descending
-        scored_chunks.sort(key=lambda x: x["score"], reverse=True)
+        scored_chunks.sort(key=lambda x: x[0], reverse=True)
         
-        # 5. Select Top Chunks within Budget
-        selected_chunks = []
-        current_tokens = 0
+        # Select top chunks
+        selected_chunks = [chunk for _, chunk in scored_chunks[:max_chunks]]
         
-        # If no budget provided, use a sensible default or just max_chunks
-        budget = target_token_budget if target_token_budget else 2000
-        
-        for item in scored_chunks:
-            chunk = item["chunk"]
-            
-            # Filter out zero-score items (irrelevant) unless we are desperate?
-            # Usually BM25 returns 0 for no keyword overlap.
-            # If we have very few chunks, we might want to include recent ones even if score is 0.
-            # Let's include if score > 0 OR it's very recent (last 3 chunks).
-            is_recent = (len(session_chunks) - item["index"]) <= 3
-            
-            if item["score"] > 0 or is_recent:
-                if current_tokens + chunk["token_count"] <= budget:
-                    selected_chunks.append(chunk)
-                    current_tokens += chunk["token_count"]
-                    
-                if len(selected_chunks) >= max_chunks:
-                    break
-        
-        # 6. Re-sort by original index (Chronological)
-        # This is crucial for chat context to make sense.
-        selected_chunks.sort(key=lambda x: x["original_index"])
-        
-        # 7. Format Output
+        # Sort selected chunks by time (original order) to maintain flow
+        selected_chunks.sort(key=lambda x: all_chunks.index(x))
+
+        # 2. Shrinking / Token Budget
         optimized_context = []
+        total_raw_tokens = 0
+        total_opt_tokens = 0
+        total_raw_chars = 0
+        total_opt_chars = 0
+
+        try:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        except:
+            encoding = tiktoken.get_encoding("p50k_base")
+
         for chunk in selected_chunks:
+            content = chunk.get('content', '')
+            raw_tokens = len(encoding.encode(content))
+            raw_chars = len(content)
+            
+            optimized_content = content
+            # Shrinking logic: truncate long logs or file reads
+            if chunk.get('source') in ['file_read', 'logs'] and len(content) > 1000:
+                optimized_content = content[:500] + "\n... [truncated] ...\n" + content[-500:]
+            
+            opt_tokens = len(encoding.encode(optimized_content))
+            opt_chars = len(optimized_content)
+
             optimized_context.append({
-                "summary": f"[{chunk['role']}] {chunk['content']}",
-                "score": 0 # Placeholder
+                "type": chunk.get("source", "unknown"),
+                "role": chunk.get("role", "unknown"),
+                "source": chunk.get("source", "unknown"),
+                "raw_tokens": raw_tokens,
+                "raw_chars": raw_chars,
+                "optimized_tokens": opt_tokens,
+                "optimized_chars": opt_chars,
+                "summary": f"[{chunk.get('role')}]: {optimized_content}" 
             })
             
-        percent_saved = 0.0
-        if raw_tokens > 0:
-            percent_saved = ((raw_tokens - current_tokens) / raw_tokens) * 100
-            
-        elapsed = time.time() - start_time
-        
+            total_raw_tokens += raw_tokens
+            total_opt_tokens += opt_tokens
+            total_raw_chars += raw_chars
+            total_opt_chars += opt_chars
+
+        # Enforce token budget if specified
+        if target_token_budget and total_opt_tokens > target_token_budget:
+            logger.info(f"Token budget exceeded ({total_opt_tokens} > {target_token_budget}). Truncating...")
+            while total_opt_tokens > target_token_budget and optimized_context:
+                # Remove least relevant? Or just oldest?
+                # Since we sorted by time, removing from start removes oldest.
+                # But maybe we should remove lowest score?
+                # For now, remove from start (oldest)
+                removed = optimized_context.pop(0)
+                total_opt_tokens -= removed['optimized_tokens']
+                total_opt_chars -= removed['optimized_chars']
+
+        percent_saved = 0
+        if total_raw_tokens > 0:
+            percent_saved = ((total_raw_tokens - total_opt_tokens) / total_raw_tokens) * 100
+
+        # Log AFTER context
+        logger.info(f"Optimized: {len(optimized_context)} chunks, ~{total_opt_tokens} tokens")
+        logger.info(f"Savings: {percent_saved:.1f}%")
+        logger.info(f"--- OPTIMIZATION END ---")
+
         return {
             "optimized_context": optimized_context,
-            "raw_token_est": raw_tokens,
-            "optimized_token_est": current_tokens,
-            "percent_saved_est": percent_saved
+            "raw_token_est": total_raw_tokens,
+            "optimized_token_est": total_opt_tokens,
+            "percent_saved_est": percent_saved,
+            "raw_chars": total_raw_chars,
+            "optimized_chars": total_opt_chars
         }
