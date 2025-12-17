@@ -32,7 +32,10 @@ Server runs on `http://localhost:8000`
 1. Fork this repository
 2. Create a new Web Service on Render
 3. Connect your repository
-4. Render will automatically detect `requirements.txt` and deploy
+4. Use the following settings:
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
+
 
 ## 🔧 Usage
 
