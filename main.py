@@ -1,234 +1,331 @@
+"""
+Context Optimizer Gateway
+=========================
+A simple OpenRouter-compatible proxy that receives AI IDE context,
+restructures it, and forwards to OpenRouter.
+
+Phase 1: Logging + Context Manipulation (prove we can intercept and modify)
+Phase 2: Add chunking
+Phase 3: Add RAG retrieval
+"""
+
 import os
+import json
 import time
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Union, Literal
+from dataclasses import dataclass, field, asdict
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import tiktoken
 
-from context_optimizer import ContextOptimizer
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("context-optimizer-gateway")
+# ============================================================================
+# LOGGING SETUP - Clean, colorful, structured
+# ============================================================================
 
-
-# ===== OpenRouter-Compatible Request Models =====
-
-class TextContent(BaseModel):
-    type: Literal["text"] = "text"
-    text: str
-
-
-class ImageContentPart(BaseModel):
-    type: Literal["image_url"] = "image_url"
-    image_url: Dict[str, str]  # {url: str, detail?: str}
-
-
-ContentPart = Union[TextContent, ImageContentPart]
-
-
-class Message(BaseModel):
-    model_config = {"extra": "allow"}
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter with colors and better structure."""
     
-    role: str
-    content: Union[str, List[ContentPart]]
-    name: Optional[str] = None
-    tool_call_id: Optional[str] = None  # For tool role messages
+    COLORS = {
+        'DEBUG': '\033[36m',     # Cyan
+        'INFO': '\033[32m',      # Green
+        'WARNING': '\033[33m',   # Yellow
+        'ERROR': '\033[31m',     # Red
+        'CRITICAL': '\033[35m',  # Magenta
+        'RESET': '\033[0m',      # Reset
+        'BOLD': '\033[1m',       # Bold
+        'DIM': '\033[2m',        # Dim
+    }
+    
+    def format(self, record):
+        # Add timestamp
+        timestamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        
+        # Get color for level
+        color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
+        reset = self.COLORS['RESET']
+        dim = self.COLORS['DIM']
+        bold = self.COLORS['BOLD']
+        
+        # Format the message
+        level_short = record.levelname[0]  # Just first letter
+        
+        return f"{dim}{timestamp}{reset} {color}{bold}[{level_short}]{reset} {record.getMessage()}"
 
 
-class FunctionDescription(BaseModel):
-    description: Optional[str] = None
-    name: str
-    parameters: Dict[str, Any]  # JSON Schema object
+def setup_logging():
+    """Configure beautiful logging."""
+    # Create logger
+    logger = logging.getLogger("gateway")
+    logger.setLevel(logging.DEBUG)
+    
+    # Remove existing handlers
+    logger.handlers = []
+    
+    # Add colored console handler
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColoredFormatter())
+    logger.addHandler(handler)
+    
+    return logger
 
 
-class Tool(BaseModel):
-    type: Literal["function"] = "function"
-    function: FunctionDescription
+log = setup_logging()
 
 
-class ToolChoiceFunction(BaseModel):
-    type: Literal["function"] = "function"
-    function: Dict[str, str]  # {name: str}
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+@dataclass
+class RequestStats:
+    """Track stats for a single request."""
+    request_id: str
+    timestamp: float = field(default_factory=time.time)
+    
+    # Input stats
+    input_messages: int = 0
+    input_tokens: int = 0
+    
+    # Output stats
+    output_messages: int = 0
+    output_tokens: int = 0
+    
+    # Processing
+    optimization_applied: bool = False
+    processing_time_ms: float = 0
+    
+    def to_dict(self):
+        return asdict(self)
 
 
-ToolChoice = Union[Literal["none", "auto"], ToolChoiceFunction]
+# ============================================================================
+# TOKEN COUNTER
+# ============================================================================
+
+class TokenCounter:
+    """Simple token counter using tiktoken."""
+    
+    def __init__(self):
+        try:
+            self.encoding = tiktoken.get_encoding("cl100k_base")
+        except:
+            self.encoding = tiktoken.get_encoding("p50k_base")
+    
+    def count(self, text: str) -> int:
+        """Count tokens in text."""
+        if not text:
+            return 0
+        return len(self.encoding.encode(text))
+    
+    def count_message(self, message: Dict[str, Any]) -> int:
+        """Count tokens in a message."""
+        tokens = 4  # Message overhead
+        content = message.get("content", "")
+        
+        if isinstance(content, str):
+            tokens += self.count(content)
+        elif isinstance(content, list):
+            # Handle content parts (text, images, etc.)
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    tokens += self.count(part.get("text", ""))
+        
+        tokens += self.count(message.get("role", ""))
+        return tokens
+    
+    def count_messages(self, messages: List[Dict[str, Any]]) -> int:
+        """Count tokens in message list."""
+        total = 3  # Reply priming
+        for msg in messages:
+            total += self.count_message(msg)
+        return total
 
 
-class ResponseFormat(BaseModel):
-    type: Literal["json_object", "json_schema"] = "json_object"
-    json_schema: Optional[Dict[str, Any]] = None
+token_counter = TokenCounter()
 
 
-class ProviderPreferences(BaseModel):
-    model_config = {"extra": "allow"}
-    # Provider routing options - pass through to OpenRouter
-    allow_fallbacks: Optional[bool] = None
-    require_parameters: Optional[bool] = None
-    data_collection: Optional[str] = None
-    order: Optional[List[str]] = None
+# ============================================================================
+# CONTEXT MANIPULATOR - The core of what we're testing
+# ============================================================================
+
+class ContextManipulator:
+    """
+    Simple context manipulator.
+    For now, just logs what we receive and passes it through.
+    Later we'll add: chunking, RAG, etc.
+    """
+    
+    def __init__(self):
+        self.request_count = 0
+    
+    def process(self, messages: List[Dict[str, Any]], stats: RequestStats) -> List[Dict[str, Any]]:
+        """
+        Process incoming messages.
+        
+        For Phase 1, we just:
+        1. Log everything we receive
+        2. Prove we CAN manipulate it
+        3. Return (possibly modified) messages
+        """
+        self.request_count += 1
+        
+        log.info(f"{'='*60}")
+        log.info(f"📥 INCOMING REQUEST #{self.request_count}")
+        log.info(f"{'='*60}")
+        
+        # Analyze what we received
+        stats.input_messages = len(messages)
+        stats.input_tokens = token_counter.count_messages(messages)
+        
+        log.info(f"📊 Messages: {stats.input_messages}")
+        log.info(f"📊 Tokens: {stats.input_tokens:,}")
+        
+        # Log each message (summarized)
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = self._extract_text(msg.get("content", ""))
+            
+            # Truncate for logging
+            preview = content[:100] + "..." if len(content) > 100 else content
+            preview = preview.replace("\n", "\\n")
+            
+            log.debug(f"  [{i}] {role}: {preview}")
+        
+        # Identify message types
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+        tool_msgs = [m for m in messages if m.get("role") in ("tool", "function")]
+        
+        log.info(f"📋 Breakdown: system={len(system_msgs)}, user={len(user_msgs)}, "
+                f"assistant={len(assistant_msgs)}, tool={len(tool_msgs)}")
+        
+        # ====================================================================
+        # MANIPULATION ZONE
+        # For now, just pass through. Later we'll:
+        # 1. Chunk the context
+        # 2. Do RAG retrieval
+        # 3. Reconstruct optimized context
+        # ====================================================================
+        
+        # PROOF OF MANIPULATION: Add a marker to the system message
+        # This proves we're actually intercepting and modifying context
+        output_messages = []
+        marker_added = False
+        
+        for msg in messages:
+            new_msg = dict(msg)  # Copy
+            
+            # Add marker to system message
+            if msg.get("role") == "system" and not marker_added:
+                content = self._extract_text(msg.get("content", ""))
+                new_msg["content"] = f"{content}\n\n[🔧 Context processed by optimizer | {stats.input_messages} msgs, {stats.input_tokens} tokens]"
+                marker_added = True
+                log.info("✅ Added optimization marker to system message")
+            
+            output_messages.append(new_msg)
+        
+        # If no system message, add one with marker
+        if not marker_added:
+            output_messages.insert(0, {
+                "role": "system",
+                "content": f"[🔧 Context processed by optimizer | {stats.input_messages} msgs, {stats.input_tokens} tokens]"
+            })
+            log.info("✅ Inserted new system message with optimization marker")
+        
+        # Calculate output stats
+        stats.output_messages = len(output_messages)
+        stats.output_tokens = token_counter.count_messages(output_messages)
+        
+        # Did we optimize?
+        if stats.output_tokens < stats.input_tokens:
+            stats.optimization_applied = True
+            saved = stats.input_tokens - stats.output_tokens
+            pct = (saved / stats.input_tokens) * 100
+            log.info(f"✨ Optimized: {stats.input_tokens:,} → {stats.output_tokens:,} tokens ({pct:.1f}% saved)")
+        else:
+            log.info(f"📤 Passing through: {stats.output_messages} messages, {stats.output_tokens:,} tokens")
+        
+        log.info(f"{'='*60}")
+        
+        return output_messages
+    
+    def _extract_text(self, content) -> str:
+        """Extract text from content (handles string and list formats)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+            return " ".join(texts)
+        return str(content)
 
 
-class PredictionContent(BaseModel):
-    type: Literal["content"] = "content"
-    content: str
+context_manipulator = ContextManipulator()
 
 
-class DebugOptions(BaseModel):
-    echo_upstream_body: Optional[bool] = None
-
+# ============================================================================
+# PYDANTIC MODELS (Simplified)
+# ============================================================================
 
 class ChatCompletionRequest(BaseModel):
-    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
+    """OpenRouter-compatible chat completion request."""
     
-    # Core parameters (either messages or prompt required)
-    messages: Optional[List[Any]] = None  # Accept any message format
+    model_config = {"extra": "allow"}
+    
+    # Core
+    messages: Optional[List[Any]] = None
     prompt: Optional[str] = None
-    model: Optional[str] = None  # If omitted, uses user's default
+    model: Optional[str] = None
     
-    # Response formatting
-    response_format: Optional[Any] = None  # Accept any format
-    
-    # Stop sequences
-    stop: Optional[Union[str, List[str]]] = None
+    # Generation params
     stream: Optional[bool] = False
-    
-    # Token limits
     max_tokens: Optional[int] = None
-    
-    # Temperature and sampling
     temperature: Optional[float] = None
     top_p: Optional[float] = None
-    top_k: Optional[int] = None
-    top_a: Optional[float] = None
-    min_p: Optional[float] = None
     
-    # Penalties
-    frequency_penalty: Optional[float] = None
-    presence_penalty: Optional[float] = None
-    repetition_penalty: Optional[float] = None
-    
-    # Tool calling
-    tools: Optional[List[Any]] = None  # Accept any tool format
-    tool_choice: Optional[Any] = None  # Accept any choice format
-    parallel_tool_calls: Optional[bool] = None
-    
-    # Advanced parameters
-    seed: Optional[int] = None
-    logit_bias: Optional[Dict] = None  # Accept any dict
-    logprobs: Optional[bool] = None
-    top_logprobs: Optional[int] = None
-    
-    # Predicted outputs (OpenAI latency optimization)
-    prediction: Optional[Any] = None  # Accept any prediction format
-    
-    # OpenRouter-specific parameters
+    # OpenRouter specific
     transforms: Optional[List[str]] = None
-    models: Optional[List[str]] = None  # For fallback routing
-    route: Optional[str] = None  # Accept any route string
-    provider: Optional[Any] = None  # Accept any provider format
-    user: Optional[str] = None
+    route: Optional[str] = None
     
-    # Debug options (streaming only)
-    debug: Optional[Any] = None  # Accept any debug format
-    
-    # Context Optimizer parameters (custom, won't be sent to OpenRouter)
+    # Our params
     enable_optimization: Optional[bool] = True
-    target_token_budget: Optional[int] = None
-    max_chunks: Optional[int] = 12
 
+
+# ============================================================================
+# FASTAPI APP
+# ============================================================================
 
 app = FastAPI(
     title="Context Optimizer Gateway",
-    version="1.0.0",
-    description="OpenRouter-compatible gateway with intelligent context optimization"
+    version="2.0.0",
+    description="Simple OpenRouter proxy with context manipulation"
 )
-optimizer = ContextOptimizer()
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 
-def extract_api_key(authorization: str):
-    """Extract OpenRouter API key from Authorization header"""
+def extract_api_key(authorization: str) -> str:
+    """Extract API key from Authorization header."""
     if not authorization:
-        raise HTTPException(
-            status_code=401, 
-            detail="Missing Authorization header"
-        )
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
     
-    # Clean and parse authorization header
-    authorization = authorization.strip()
-    
-    # Handle both "Bearer token" and just "token" formats
-    if authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()  # Skip "Bearer "
-    else:
-        # Some clients might send token directly
-        token = authorization.strip()
-    
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing API key")
-    
-    return token
-
-
-def count_messages_tokens(messages: List[Dict[str, Any]], model: Optional[str] = None) -> int:
-    """
-    Count total tokens in a list of messages using tiktoken.
-    Uses model-specific encoding if available, otherwise defaults to cl100k_base.
-    """
-    encoding = None
-    if model:
-        try:
-            # Strip vendor prefix (e.g. "openai/gpt-4o" -> "gpt-4o")
-            model_name = model.split("/")[-1]
-            encoding = tiktoken.encoding_for_model(model_name)
-        except Exception:
-            pass
-            
-    if not encoding:
-        try:
-            encoding = tiktoken.get_encoding("cl100k_base")
-        except:
-            encoding = tiktoken.get_encoding("p50k_base")
-        
-    num_tokens = 0
-    for message in messages:
-        # Every message follows <|start|>{role/name}\n{content}<|end|>\n
-        num_tokens += 4
-        for key, value in message.items():
-            if key == "content":
-                num_tokens += len(encoding.encode(extract_text_content(value)))
-            elif key == "role":
-                num_tokens += len(encoding.encode(str(value)))
-                
-    num_tokens += 3  # Every reply is primed with <|start|>assistant<|message|>
-    return num_tokens
-
-
-def extract_text_content(content: Union[str, List[ContentPart]]) -> str:
-    """Extract text from message content (handles both string and ContentPart array)"""
-    if isinstance(content, str):
-        return content
-    
-    # Extract text from ContentPart array
-    text_parts = []
-    for part in content:
-        if isinstance(part, dict):
-            if part.get("type") == "text":
-                text_parts.append(part.get("text", ""))
-        elif hasattr(part, "type") and part.type == "text":
-            text_parts.append(part.text)
-    
-    return " ".join(text_parts)
+    auth = authorization.strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return auth
 
 
 @app.post("/v1/chat/completions")
-@app.post("/api/v1/chat/completions")  # Also support OpenRouter's path
+@app.post("/api/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
     authorization: Optional[str] = Header(None, alias="authorization"),
@@ -236,458 +333,197 @@ async def chat_completions(
     x_title: Optional[str] = Header(None, alias="x-title"),
 ):
     """
-    OpenRouter-compatible chat completions with intelligent context optimization.
-    
-    Supports all OpenRouter parameters plus context optimization:
-    - enable_optimization: Enable/disable optimization (default: true)
-    - target_token_budget: Max tokens for optimized context
-    - max_chunks: Max context chunks to retain (default: 12)
+    Main endpoint - receives context from AI IDEs (Kilocode, Cursor, etc.),
+    manipulates it, then forwards to OpenRouter.
     """
-    # Extract OpenRouter API key
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    start_time = time.time()
     
-    openrouter_api_key = extract_api_key(authorization)
+    # Create request stats
+    request_id = f"req_{int(time.time() * 1000)}"
+    stats = RequestStats(request_id=request_id)
     
-    # Validate request
+    # Extract API key
+    api_key = extract_api_key(authorization)
+    
+    # Validate
     if not request.messages and not request.prompt:
-        raise HTTPException(
-            status_code=400,
-            detail="Either 'messages' or 'prompt' is required"
-        )
+        raise HTTPException(status_code=400, detail="Either 'messages' or 'prompt' is required")
     
-    # Convert to messages format if prompt was provided
+    # Convert prompt to messages if needed
     if request.prompt and not request.messages:
         request.messages = [{"role": "user", "content": request.prompt}]
     
-    # Extract messages - handle any format
+    # Normalize messages to dicts
     messages = []
     for msg in request.messages:
         if isinstance(msg, dict):
             messages.append(msg)
+        elif hasattr(msg, 'model_dump'):
+            messages.append(msg.model_dump(exclude_none=True))
+        elif hasattr(msg, 'dict'):
+            messages.append(msg.dict(exclude_none=True))
         else:
-            # Handle Pydantic models or other objects
-            try:
-                if hasattr(msg, 'model_dump'):
-                    messages.append(msg.model_dump(exclude_none=True))
-                elif hasattr(msg, 'dict'):
-                    messages.append(msg.dict(exclude_none=True))
-                else:
-                    messages.append(dict(msg))
-            except:
-                # Fallback: treat as dict
-                messages.append(msg if isinstance(msg, dict) else {"role": "user", "content": str(msg)})
+            messages.append({"role": "user", "content": str(msg)})
     
-    # Track original state
-    original_message_count = len(messages)
-    optimization_applied = False
-    optimization_stats = {}
+    # ========================================================================
+    # CONTEXT MANIPULATION
+    # ========================================================================
+    if request.enable_optimization:
+        messages = context_manipulator.process(messages, stats)
     
-    # Apply context optimization if enabled and worthwhile
-    if request.enable_optimization and len(messages) > 3:
-        try:
-            # Generate stable session ID
-            session_id = request.user or f"session_{hash(str(messages[0]))}"
-            
-            # Prepare events for ingestion (history except last message)
-            events = []
-            for msg in messages[:-1]:
-                content = extract_text_content(msg.get("content", ""))
-                if content:
-                    events.append({
-                        "role": msg.get("role", "user"),
-                        "source": "chat",
-                        "content": content,
-                        "ts": time.time()
-                    })
-            
-            # Ingest conversation history
-            if events:
-                optimizer.ingest(session_id, events)
-            
-            # Get latest message content as query
-            latest_msg = messages[-1]
-            query_text = extract_text_content(latest_msg.get("content", ""))
-            
-            # Optimize context
-            # Optimize context
-            optimization_result = optimizer.optimize(
-                session_id,
-                query_text
-            )
-            
-            # Apply optimization if we got useful results
-            if optimization_result.get("optimized_context"):
-                optimization_applied = True
-                optimization_stats = {
-                    "raw_tokens": optimization_result.get("original_tokens", 0),
-                    "optimized_tokens": optimization_result.get("optimized_tokens", 0),
-                    "percent_saved": optimization_result.get("percent_saved", 0)
-                }
-                
-                # Build optimized context with ROLE FORMATTING
-                optimized_chunks = optimization_result.get("optimized_context", [])
-                
-                # Group chunks by type for structured formatting
-                context_sections = {
-                    "recent_conversation": [],
-                    "relevant_context": [],
-                    "code_snippets": []
-                }
-                
-                for chunk in optimized_chunks:
-                    content = chunk.get("content", "")
-                    if not content:
-                        continue
-                    
-                    # Categorize chunks
-                    if chunk.get('is_recent', False):
-                        context_sections["recent_conversation"].append(content)
-                    elif '```' in content or 'def ' in content or 'class ' in content:
-                        context_sections["code_snippets"].append(content)
-                    else:
-                        context_sections["relevant_context"].append(content)
-                
-                # Build structured prompt
-                formatted_context_parts = []
-                
-                if context_sections["recent_conversation"]:
-                    formatted_context_parts.append("=== RECENT CONVERSATION ===")
-                    formatted_context_parts.extend(context_sections["recent_conversation"])
-                
-                if context_sections["relevant_context"]:
-                    formatted_context_parts.append("\n=== RELEVANT CONTEXT ===")
-                    formatted_context_parts.extend(context_sections["relevant_context"])
-                
-                if context_sections["code_snippets"]:
-                    formatted_context_parts.append("\n=== CODE REFERENCES ===")
-                    formatted_context_parts.extend(context_sections["code_snippets"])
-                
-                optimized_context = "\n\n".join(formatted_context_parts)
-                
-                # RECONSTRUCT CONTEXT:
-                # We strictly send ONLY:
-                # 1. System message (with injected optimized context)
-                # 2. The final user query
-                
-                # Find existing system message
-                system_msg_idx = None
-                for idx, msg in enumerate(messages):
-                    if msg.get("role") == "system":
-                        system_msg_idx = idx
-                        break
-                
-                final_messages = []
-                
-                # 1. Add System Message
-                if system_msg_idx is not None:
-                    # Update existing system message
-                    existing_content = extract_text_content(messages[system_msg_idx].get("content", ""))
-                    final_messages.append({
-                        "role": "system",
-                        "content": f"{existing_content}\n\n[OPTIMIZED CONTEXT]:\n{optimized_context}"
-                    })
-                else:
-                    # Create new system message
-                    final_messages.append({
-                        "role": "system",
-                        "content": f"[OPTIMIZED CONTEXT]:\n{optimized_context}"
-                    })
-                
-                # 2. Add Last User Message (The Query)
-                # We assume the last message is the user's query.
-                if messages:
-                    last_msg = messages[-1]
-                    # Only add if it's not the system message we just processed
-                    if last_msg.get("role") != "system":
-                        final_messages.append(last_msg)
-                
-                # REPLACE the messages list completely
-                messages = final_messages
-                
-                # Debug: Verify reconstruction
-                logger.info(f"Context Reconstruction: Reduced {original_message_count} messages -> {len(messages)} messages (System + Query)")
-        
-        except Exception as e:
-            # Don't fail request if optimization fails, just log and continue
-            logger.warning(f"Context optimization failed: {e}")
-            optimization_applied = False
-    
-    # Build OpenRouter request (exclude our custom params)
+    # Build OpenRouter request
     request_dict = request.model_dump(exclude_none=True)
-    optimization_params = {"enable_optimization", "target_token_budget", "max_chunks"}
-    openrouter_request = {k: v for k, v in request_dict.items() if k not in optimization_params}
     
-    # Update with optimized messages
-    openrouter_request["messages"] = messages
+    # Remove our custom params
+    for param in ["enable_optimization"]:
+        request_dict.pop(param, None)
     
-    # Remove prompt if we converted it to messages
-    openrouter_request.pop("prompt", None)
+    # Update with processed messages
+    request_dict["messages"] = messages
+    request_dict.pop("prompt", None)
     
-    # Calculate FINAL token count after everything is constructed
-    if optimization_applied:
-        final_token_count = count_messages_tokens(messages, model=request.model)
-        initial_token_count = count_messages_tokens(request.messages, model=request.model) if request.messages else original_message_count * 100 # fallback
-        
-        savings_pct = 0
-        if initial_token_count > 0:
-            savings_pct = ((initial_token_count - final_token_count) / initial_token_count) * 100
-        
-        logger.info(
-            f"Optimization: {original_message_count} msgs → {len(messages)} msgs | "
-            f"Real Tokens: {initial_token_count} → {final_token_count} "
-            f"({savings_pct:.1f}% saved)"
-        )
-        
-        # Update stats for headers
-        optimization_stats = {
-            "raw_tokens": initial_token_count,
-            "optimized_tokens": final_token_count,
-            "percent_saved": savings_pct
-        }
+    # Calculate processing time
+    stats.processing_time_ms = (time.time() - start_time) * 1000
     
-    # Prepare headers for OpenRouter
+    # Prepare headers
     headers = {
-        "Authorization": f"Bearer {openrouter_api_key}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": http_referer or "https://cursor-op.up.railway.app",
+        "HTTP-Referer": http_referer or "https://context-optimizer.app",
         "X-Title": x_title or "Context Optimizer Gateway"
     }
     
-    # Debug log (hide most of key for security)
-    key_preview = f"{openrouter_api_key[:10]}...{openrouter_api_key[-4:]}" if len(openrouter_api_key) > 14 else "***"
-    logger.info(f"Forwarding request to OpenRouter: {len(openrouter_request['messages'])} messages | Key: {key_preview}")
+    log.info(f"🚀 Forwarding to OpenRouter (processed in {stats.processing_time_ms:.1f}ms)")
     
-    # Call OpenRouter
+    # Stream or regular response
     if request.stream:
-        # Streaming response - keep client alive during streaming
         async def generate():
             try:
                 async with httpx.AsyncClient(timeout=120.0) as client:
                     async with client.stream(
                         "POST",
                         f"{OPENROUTER_API_BASE}/chat/completions",
-                        json=openrouter_request,
+                        json=request_dict,
                         headers=headers
                     ) as response:
                         async for chunk in response.aiter_bytes():
                             yield chunk
             except Exception as e:
-                logger.error(f"Streaming error: {e}")
-                # Yield error in SSE format
-                error_data = f'data: {{"error": "{str(e)}"}}\n\n'
-                yield error_data.encode()
+                log.error(f"Streaming error: {e}")
+                yield f'data: {{"error": "{str(e)}"}}\n\n'.encode()
         
-        return StreamingResponse(
-            generate(),
-            media_type="text/event-stream"
-        )
+        return StreamingResponse(generate(), media_type="text/event-stream")
     else:
-        # Non-streaming response
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     f"{OPENROUTER_API_BASE}/chat/completions",
-                    json=openrouter_request,
+                    json=request_dict,
                     headers=headers
                 )
                 
-                # Log errors from OpenRouter
                 if response.status_code != 200:
-                    error_body = response.text
-                    logger.error(f"OpenRouter error {response.status_code}: {error_body}")
+                    log.error(f"OpenRouter error {response.status_code}: {response.text[:200]}")
                 
-                # Build response headers
-                response_headers = {}
-                if optimization_applied:
-                    response_headers["X-Context-Optimization"] = "enabled"
-                    response_headers["X-Context-Original-Messages"] = str(original_message_count)
-                    response_headers["X-Context-Optimized-Messages"] = str(len(messages))
-                    response_headers["X-Context-Token-Savings"] = f"{optimization_stats.get('percent_saved', 0):.1f}%"
+                # Add our headers
+                response_headers = {
+                    "X-Context-Request-Id": request_id,
+                    "X-Context-Input-Tokens": str(stats.input_tokens),
+                    "X-Context-Output-Tokens": str(stats.output_tokens),
+                    "X-Context-Processing-Ms": f"{stats.processing_time_ms:.1f}",
+                }
                 
-                # Return exact OpenRouter response (including errors)
                 return JSONResponse(
                     content=response.json(),
                     status_code=response.status_code,
                     headers=response_headers
                 )
-        
         except httpx.HTTPError as e:
-            logger.error(f"OpenRouter request failed: {e}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"Failed to reach OpenRouter: {str(e)}"
-            )
+            log.error(f"OpenRouter request failed: {e}")
+            raise HTTPException(status_code=502, detail=f"Failed to reach OpenRouter: {str(e)}")
 
+
+# ============================================================================
+# PASSTHROUGH ENDPOINTS
+# ============================================================================
 
 @app.get("/v1/models")
 @app.get("/api/v1/models")
 async def list_models(authorization: Optional[str] = Header(None)):
-    """List available OpenRouter models"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    openrouter_api_key = extract_api_key(authorization)
+    """List available models."""
+    api_key = extract_api_key(authorization)
     
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{OPENROUTER_API_BASE}/models",
-                headers={"Authorization": f"Bearer {openrouter_api_key}"}
-            )
-            return JSONResponse(
-                content=response.json(),
-                status_code=response.status_code
-            )
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to fetch models: {e}")
-        raise HTTPException(status_code=502, detail="Failed to fetch models from OpenRouter")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{OPENROUTER_API_BASE}/models",
+            headers={"Authorization": f"Bearer {api_key}"}
+        )
+        return JSONResponse(content=response.json(), status_code=response.status_code)
 
 
 @app.get("/v1/models/{model_id}")
 @app.get("/api/v1/models/{model_id}")
 async def get_model(model_id: str, authorization: Optional[str] = Header(None)):
-    """Get specific model info (proxy to OpenRouter)"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    openrouter_api_key = extract_api_key(authorization)
+    """Get model info."""
+    api_key = extract_api_key(authorization)
     
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{OPENROUTER_API_BASE}/models/{model_id}",
-                headers={"Authorization": f"Bearer {openrouter_api_key}"}
-            )
-            return JSONResponse(
-                content=response.json(),
-                status_code=response.status_code
-            )
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to fetch model {model_id}: {e}")
-        raise HTTPException(status_code=502, detail="Failed to fetch model from OpenRouter")
-
-
-@app.get("/v1/models/{model_id}/endpoints")
-@app.get("/api/v1/models/{model_id}/endpoints")
-async def get_model_endpoints(model_id: str, authorization: Optional[str] = Header(None)):
-    """Get model endpoints (proxy to OpenRouter)"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    openrouter_api_key = extract_api_key(authorization)
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{OPENROUTER_API_BASE}/models/{model_id}/endpoints",
-                headers={"Authorization": f"Bearer {openrouter_api_key}"}
-            )
-            return JSONResponse(
-                content=response.json(),
-                status_code=response.status_code
-            )
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to fetch endpoints for {model_id}: {e}")
-        # Return empty endpoints if not supported
-        return JSONResponse(
-            content={"endpoints": []},
-            status_code=200
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{OPENROUTER_API_BASE}/models/{model_id}",
+            headers={"Authorization": f"Bearer {api_key}"}
         )
+        return JSONResponse(content=response.json(), status_code=response.status_code)
 
 
-@app.get("/api/v1/generation")
-async def get_generation(
-    id: str,
-    authorization: Optional[str] = Header(None)
-):
-    """Query generation stats by ID (OpenRouter passthrough)"""
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    openrouter_api_key = extract_api_key(authorization)
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{OPENROUTER_API_BASE}/generation",
-                params={"id": id},
-                headers={"Authorization": f"Bearer {openrouter_api_key}"}
-            )
-            return JSONResponse(
-                content=response.json(),
-                status_code=response.status_code
-            )
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to fetch generation: {e}")
-        raise HTTPException(status_code=502, detail="Failed to fetch generation from OpenRouter")
-
+# ============================================================================
+# UTILITY ENDPOINTS
+# ============================================================================
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
+    """Health check."""
     return {
         "status": "healthy",
-        "service": "context-optimizer-gateway",
-        "version": "1.0.0",
-        "features": [
-            "BM25 retrieval",
-            "SimHash deduplication",
-            "Role-aware shrinking",
-            "Token estimation",
-            "Intelligent caching"
-        ]
+        "version": "2.0.0",
+        "phase": "1 - Logging & Context Manipulation",
+        "requests_processed": context_manipulator.request_count
     }
 
 
 @app.get("/")
 async def root():
-    """Root endpoint with API information"""
+    """API info."""
     return {
         "service": "Context Optimizer Gateway",
-        "version": "1.0.0",
-        "description": "OpenRouter-compatible API gateway with intelligent context optimization",
-        "optimization_techniques": [
-            "BM25 retrieval for relevance scoring",
-            "SimHash deduplication for content similarity",
-            "Role-aware context shrinking",
-            "Token budget enforcement",
-            "Query-based caching"
-        ],
-        "api_compatibility": "Full OpenRouter API support",
+        "version": "2.0.0",
+        "phase": "1 - Logging & Context Manipulation",
         "endpoints": {
-            "chat_completions": "/v1/chat/completions or /api/v1/chat/completions",
-            "models": "/v1/models or /api/v1/models",
-            "generation": "/api/v1/generation",
+            "chat": "/v1/chat/completions",
+            "models": "/v1/models",
             "health": "/health"
         },
-        "setup": {
-            "base_url": "https://cursor-op.onrender.com",
-            "api_key": "Your OpenRouter API key",
-            "compatibility": "Works with Cursor, VS Code, Continue, and any OpenAI-compatible client"
-        },
-        "optimization": {
-            "enabled_by_default": True,
-            "triggers": "Automatic for 4+ messages",
-            "disable": "Set enable_optimization: false in request",
-            "parameters": {
-                "enable_optimization": "Enable/disable optimization (default: true)",
-                "target_token_budget": "Max tokens for optimized context",
-                "max_chunks": "Max context chunks to retain (default: 12)"
-            }
-        },
-        "openrouter_features": [
-            "All parameters supported (temperature, top_p, top_k, etc.)",
-            "Tool calling",
-            "Response formatting (JSON mode)",
-            "Assistant prefill",
-            "Streaming",
-            "Model routing & fallbacks",
-            "Provider preferences"
-        ]
+        "roadmap": {
+            "phase_1": "✅ Logging + Context Manipulation (current)",
+            "phase_2": "⏳ Chunking",
+            "phase_3": "⏳ RAG Retrieval"
+        }
     }
 
+
+# ============================================================================
+# MAIN
+# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
     
     port = int(os.getenv("PORT", "8000"))
-    logger.info(f"Starting Context Optimizer Gateway v1.0.0 on port {port}")
-    logger.info("Features: BM25 retrieval | SimHash dedup | Role-aware shrinking")
+    
+    log.info("=" * 60)
+    log.info("🚀 Context Optimizer Gateway v2.0.0")
+    log.info("=" * 60)
+    log.info(f"📍 Running on port {port}")
+    log.info(f"📋 Phase 1: Logging & Context Manipulation")
+    log.info("=" * 60)
+    
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
