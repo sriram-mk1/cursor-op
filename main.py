@@ -77,6 +77,9 @@ def setup_logging():
 
 log = setup_logging()
 
+# Token limits
+MAX_INPUT_TOKENS = 5000  # Hard limit on input tokens
+
 
 # ============================================================================
 # DATA STRUCTURES
@@ -166,12 +169,11 @@ class ContextManipulator:
     
     def process(self, messages: List[Dict[str, Any]], stats: RequestStats) -> List[Dict[str, Any]]:
         """
-        Process incoming messages.
+        Process incoming messages with token limit enforcement.
         
-        For Phase 1, we just:
-        1. Log everything we receive
-        2. Prove we CAN manipulate it
-        3. Return (possibly modified) messages
+        MAX_INPUT_TOKENS = 5000
+        If over limit, we truncate messages from the middle,
+        keeping: system message, last 2 turns, and the final user query.
         """
         self.request_count += 1
         
@@ -205,6 +207,16 @@ class ContextManipulator:
         
         log.info(f"📋 Breakdown: system={len(system_msgs)}, user={len(user_msgs)}, "
                 f"assistant={len(assistant_msgs)}, tool={len(tool_msgs)}")
+        
+        # ====================================================================
+        # TOKEN LIMIT ENFORCEMENT (5K max)
+        # ====================================================================
+        if stats.input_tokens > MAX_INPUT_TOKENS:
+            log.warning(f"⚠️ Over token limit! {stats.input_tokens:,} > {MAX_INPUT_TOKENS:,}")
+            messages = self._truncate_to_limit(messages, MAX_INPUT_TOKENS)
+            new_token_count = token_counter.count_messages(messages)
+            log.info(f"✂️ Truncated: {stats.input_tokens:,} → {new_token_count:,} tokens")
+            stats.optimization_applied = True
         
         # ====================================================================
         # MANIPULATION ZONE
@@ -267,6 +279,52 @@ class ContextManipulator:
                     texts.append(part.get("text", ""))
             return " ".join(texts)
         return str(content)
+    
+    def _truncate_to_limit(self, messages: List[Dict[str, Any]], max_tokens: int) -> List[Dict[str, Any]]:
+        """
+        Truncate messages to fit within token limit.
+        Strategy: Keep system message, last user message, and recent context.
+        Remove older middle messages first.
+        """
+        if not messages:
+            return messages
+        
+        # Separate message types
+        system_msg = None
+        other_msgs = []
+        
+        for msg in messages:
+            if msg.get("role") == "system" and system_msg is None:
+                system_msg = msg
+            else:
+                other_msgs.append(msg)
+        
+        # Always keep: system (if exists), last message (the query)
+        # Then add from the end until we hit the limit
+        result = []
+        current_tokens = 0
+        
+        # Add system message first
+        if system_msg:
+            sys_tokens = token_counter.count_message(system_msg)
+            result.append(system_msg)
+            current_tokens += sys_tokens
+        
+        # Add messages from the end (most recent first)
+        messages_to_add = []
+        for msg in reversed(other_msgs):
+            msg_tokens = token_counter.count_message(msg)
+            if current_tokens + msg_tokens <= max_tokens:
+                messages_to_add.insert(0, msg)  # Insert at beginning to maintain order
+                current_tokens += msg_tokens
+            else:
+                # Skip this message (too old, over budget)
+                log.debug(f"  Dropping message: {msg.get('role')} ({msg_tokens} tokens)")
+        
+        result.extend(messages_to_add)
+        
+        log.info(f"📝 Kept {len(result)} of {len(messages)} messages ({current_tokens:,} tokens)")
+        return result
 
 
 context_manipulator = ContextManipulator()
@@ -473,6 +531,62 @@ async def get_model(model_id: str, authorization: Optional[str] = Header(None)):
             headers={"Authorization": f"Bearer {api_key}"}
         )
         return JSONResponse(content=response.json(), status_code=response.status_code)
+
+
+# ============================================================================
+# ANALYTICS ENDPOINTS (OpenRouter Activity API)
+# ============================================================================
+
+@app.get("/v1/activity")
+@app.get("/api/v1/activity")
+@app.get("/activity")
+async def get_activity(
+    date: Optional[str] = None,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Get accurate usage analytics from OpenRouter.
+    This gives us REAL token counts, not our estimates.
+    
+    Optional: ?date=YYYY-MM-DD to filter by specific date
+    """
+    api_key = extract_api_key(authorization)
+    
+    log.info(f"📊 Fetching activity from OpenRouter" + (f" for {date}" if date else ""))
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            params = {}
+            if date:
+                params["date"] = date
+            
+            response = await client.get(
+                f"{OPENROUTER_API_BASE}/activity",
+                params=params,
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                activity = data.get("data", [])
+                
+                # Log summary
+                if activity:
+                    total_requests = sum(item.get("requests", 0) for item in activity)
+                    total_prompt = sum(item.get("prompt_tokens", 0) for item in activity)
+                    total_completion = sum(item.get("completion_tokens", 0) for item in activity)
+                    total_cost = sum(item.get("usage", 0) for item in activity)
+                    
+                    log.info(f"📈 Activity Summary:")
+                    log.info(f"   Requests: {total_requests:,}")
+                    log.info(f"   Prompt tokens: {total_prompt:,}")
+                    log.info(f"   Completion tokens: {total_completion:,}")
+                    log.info(f"   Total cost: ${total_cost:.4f}")
+            
+            return JSONResponse(content=response.json(), status_code=response.status_code)
+    except httpx.HTTPError as e:
+        log.error(f"Failed to fetch activity: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch activity: {str(e)}")
 
 
 # ============================================================================
