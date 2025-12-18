@@ -87,6 +87,7 @@ class ChatRequest(BaseModel):
     stream: Optional[bool] = False
     enable_optimization: Optional[bool] = True
     session_id: Optional[str] = None # Explicit session ID
+    api_key: Optional[str] = None # Support key in payload
 
 @app.get("/api/stats")
 async def get_stats(x_v1_key: Optional[str] = Header(None, alias="x-v1-key")):
@@ -152,36 +153,39 @@ async def chat(
     x_v1_key: Optional[str] = Header(None, alias="x-v1-key"),
     x_session_id: Optional[str] = Header(None, alias="x-session-id"),
 ):
-    # 1. Validate V1 Key
-    v1_key = x_v1_key or (authorization.replace("Bearer ", "").strip() if authorization and "v1-" in authorization else None)
-    if not v1_key:
-        raise HTTPException(status_code=401, detail="Missing V1 API Key")
+    # 1. Resolve OpenRouter Key (Primary)
+    # Priority: 
+    # 1. api_key in payload
+    # 2. Authorization header (if it's a real OR key, not a V1 key)
+    # 3. Environment variable OPENROUTER_API_KEY
+    or_key = request.api_key
     
-    key_data = db.validate_key(v1_key)
-    if not key_data:
-        raise HTTPException(status_code=401, detail="Invalid V1 API Key")
-
-    # 2. Determine Session ID & OpenRouter Key
-    session_id = request.session_id or x_session_id or f"session_{v1_key}"
-    # If the user provided an Authorization header that isn't a V1 key, use it as the OpenRouter key
-    # Otherwise use the one from the DB
-    or_key = key_data["openrouter_key"]
-    if authorization and "v1-" not in authorization:
+    if not or_key and authorization and "v1-" not in authorization:
         or_key = authorization.replace("Bearer ", "").strip()
     
+    if not or_key or or_key.strip() == "":
+        or_key = os.getenv("OPENROUTER_API_KEY")
+    
     if not or_key:
-        raise HTTPException(status_code=401, detail="Missing OpenRouter API Key")
+        raise HTTPException(status_code=401, detail="Missing OpenRouter API Key. Please provide it in the Authorization header.")
 
+    # 2. Resolve V1 Key for Tracking (Optional)
+    v1_key = x_v1_key or (authorization.replace("Bearer ", "").strip() if authorization and "v1-" in authorization else None)
+    key_data = db.validate_key(v1_key) if v1_key else None
+
+    # 3. Determine Session ID
+    session_id = request.session_id or x_session_id or (f"session_{v1_key}" if v1_key else "default_session")
+    
     msgs = request.messages or []
     if request.prompt and not msgs:
         msgs = [{"role": "user", "content": request.prompt}]
     
     original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in msgs)
     
-    # 3. V1 Pipeline: Optimize
+    # 4. V1 Pipeline: Optimize (Only if V1 key is valid for tracking)
     start_time = time.time()
     optimized_msgs = msgs
-    if request.enable_optimization and len(msgs) > 1:
+    if request.enable_optimization and len(msgs) > 1 and key_data:
         try:
             optimized_msgs = optimizer.optimize(session_id, msgs)
         except Exception as e:
@@ -194,6 +198,7 @@ async def chat(
     payload = request.model_dump(exclude_none=True)
     payload.pop("enable_optimization", None)
     payload.pop("session_id", None)
+    payload.pop("api_key", None)
     payload.pop("debug", None)
     payload["messages"] = optimized_msgs
     if "prompt" in payload: payload.pop("prompt")
@@ -201,12 +206,18 @@ async def chat(
     headers = {"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"}
 
     async def log_and_broadcast(tokens_out: int, status_code: int):
+        if not key_data or not v1_key:
+            return
+            
         latency = (time.time() - start_time) * 1000
-        log_entry = db.log_request(
-            v1_key, session_id, request.model, 
-            original_tokens, tokens_out, tokens_saved, latency
-        )
-        await manager.broadcast(v1_key, {"type": "request", "data": log_entry})
+        try:
+            log_entry = db.log_request(
+                v1_key, session_id, request.model, 
+                original_tokens, tokens_out, tokens_saved, latency
+            )
+            await manager.broadcast(v1_key, {"type": "request", "data": log_entry})
+        except Exception as e:
+            log.error(f"Logging Error: {e}")
 
     try:
         if request.stream:
