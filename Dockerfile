@@ -6,13 +6,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the FastEmbed model (avoids cold start)
-RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5')"
+# Copy application code
+COPY . .
 
-# Copy application
-COPY main.py .
-COPY context_optimizer ./context_optimizer/
-
-# Run
+# Expose port
 EXPOSE 8000
+
+# Run the application
 CMD ["python", "main.py"]
