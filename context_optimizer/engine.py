@@ -99,20 +99,20 @@ class SessionManager:
             ))
         return chunks
 
-    def hybrid_search(self, session_id: str, query_text: str, query_vec: Optional[np.ndarray], top_k: int = 30) -> List[Chunk]:
+    def hybrid_search(self, session_id: str, query_text: str, query_vec: Optional[np.ndarray], top_k: int = 45) -> List[Chunk]:
         lex_ids = {}
         try:
             q = re.sub(r'[^\w\s]', ' ', query_text).strip()
             if q:
                 cursor = self.db.execute(
-                    "SELECT id, bm25(chunks_fts) FROM chunks_fts WHERE session_id = ? AND chunks_fts MATCH ? LIMIT 60",
+                    "SELECT id, bm25(chunks_fts) FROM chunks_fts WHERE session_id = ? AND chunks_fts MATCH ? LIMIT 80",
                     (session_id, q)
                 )
                 for row in cursor:
                     lex_ids[row[0]] = -row[1]
         except: pass
 
-        all_session_chunks = self.get_session_chunks(session_id, limit=500)
+        all_session_chunks = self.get_session_chunks(session_id, limit=600)
         semantic_scores = {}
         if query_vec is not None:
             q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9)
@@ -127,15 +127,24 @@ class SessionManager:
             vs = list(d.values())
             mi, ma = min(vs), max(vs)
             if mi == ma: return {k: 1.0 for k in d}
-            return {k: (v - mi) / (ma - mi) for k, v in d.items()}
+            return {k: (v - mi) / (ma - mi + 1e-9) for k, v in d.items()}
 
         lex_norm = norm(lex_ids)
         sem_norm = norm(semantic_scores)
         
         combined = []
+        now = time.time()
         for c in all_session_chunks:
-            score = 0.3 * lex_norm.get(c.id, 0) + 0.7 * sem_norm.get(c.id, 0)
-            if score > 0.05:
+            # Hybrid Score
+            base_score = 0.3 * lex_norm.get(c.id, 0) + 0.7 * sem_norm.get(c.id, 0)
+            
+            # Recency Boost (up to 20% boost for very recent chunks)
+            age_hours = (now - c.created_at) / 3600
+            recency_boost = 1.2 / (1.0 + age_hours) 
+            
+            score = base_score * recency_boost
+            
+            if score > 0.03: # More lenient threshold
                 c.score = score
                 combined.append(c)
         
@@ -143,7 +152,7 @@ class SessionManager:
 
 class SmartChunker:
     """Fast, reliable structure-aware chunking."""
-    def __init__(self, target_tokens: int = 600):
+    def __init__(self, target_tokens: int = 800): # Larger chunks for more context
         self.target_tokens = target_tokens
         self.encoder = tiktoken.get_encoding("cl100k_base")
 
@@ -157,13 +166,13 @@ class SmartChunker:
             ctype = "exploratory"
             if p.startswith("```") or p.startswith("#"): ctype = "authoritative"
             elif "error" in p.lower() or "traceback" in p.lower(): ctype = "diagnostic"
-            elif source == "chat": ctype = "historical"
+            elif source == "chat" or source == "user" or source == "assistant": ctype = "historical"
             chunks.append((p, ctype))
         return chunks
 
 class ContextOptimizer:
     """Turbo-charged V1 Pipeline."""
-    def __init__(self):
+    def __init__(self,):
         self.sessions = SessionManager()
         self.chunker = SmartChunker()
         self.seen_messages = {} # session_id -> set of msg hashes
@@ -238,7 +247,7 @@ class ContextOptimizer:
         search_start = time.time()
         embedder = get_embedder()
         query_vec = list(embedder.embed([query_text]))[0][:128] if embedder else None
-        relevant = self.sessions.hybrid_search(session_id, query_text, query_vec, top_k=35)
+        relevant = self.sessions.hybrid_search(session_id, query_text, query_vec, top_k=45)
         search_time = (time.time() - search_start) * 1000
 
         # 4. TOON Reconstruction
@@ -252,7 +261,7 @@ class ContextOptimizer:
         if toon_context:
             optimized.append({
                 "role": "system", 
-                "content": f"RELEVANT SESSION CONTEXT (TOON):\n{toon_context}"
+                "content": f"--- SESSION CONTEXT (TOON) ---\n{toon_context}"
             })
         
         optimized.append(messages[-1])
@@ -273,15 +282,20 @@ class ContextOptimizer:
 
     def _to_toon(self, chunks: List[Chunk]) -> str:
         if not chunks: return ""
-        by_type = {}
+        
+        # Group by type then source
+        tree = {}
         for c in chunks:
-            if c.type not in by_type: by_type[c.type] = []
-            by_type[c.type].append(c)
+            if c.type not in tree: tree[c.type] = {}
+            if c.source not in tree[c.type]: tree[c.type][c.source] = []
+            tree[c.type][c.source].append(c)
             
-        lines = []
-        for ctype, cs in by_type.items():
-            lines.append(f"{ctype}[{len(cs)}]:")
-            for c in cs:
-                txt = c.text.replace('"', '\\"').replace('\n', ' ')
-                lines.append(f"  - {c.source}: \"{txt}\"")
+        lines = ["# Session Summary", ""]
+        for ctype, sources in tree.items():
+            lines.append(f"{ctype}[{sum(len(cs) for cs in sources.values())}]:")
+            for source, cs in sources.items():
+                lines.append(f"  {source}[{len(cs)}]:")
+                for c in cs:
+                    txt = c.text.replace('"', '\\"').replace('\n', ' ')
+                    lines.append(f"    - \"{txt}\"")
         return "\n".join(lines)
