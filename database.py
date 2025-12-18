@@ -12,18 +12,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("database")
 
 # Try loading from multiple possible locations
-load_dotenv() # Default .env
-load_dotenv("frontend/.env") # Also try frontend/.env
+base_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(base_dir, ".env"))
+load_dotenv(os.path.join(base_dir, "frontend", ".env"))
+load_dotenv() # Fallback to current working directory
 
 class Database:
     def __init__(self):
         url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
         key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         
+        logger.info(f"Initializing Database. URL found: {bool(url)}, Key found: {bool(key)}")
+        
         if not url or not key:
             logger.error(f"Missing Supabase credentials. URL: {'found' if url else 'MISSING'}, Key: {'found' if key else 'MISSING'}")
-            # Don't raise ValueError immediately, allow the app to start but log the error
-            # This helps debug if it's an env loading issue
             self.supabase = None
         else:
             try:
