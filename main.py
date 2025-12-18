@@ -77,6 +77,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/health")
+async def health():
+    return {"status": "ok", "timestamp": time.time()}
+
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 class ChatRequest(BaseModel):
