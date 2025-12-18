@@ -188,7 +188,7 @@ class ContextOptimizer:
             self.last_access.pop(sid, None)
 
     def ingest_event(self, session_id: str, content: Any, source: str):
-        if not content: return
+        if not content or source == "system": return
         self.last_access[session_id] = time.time()
         
         # Fast normalization
@@ -252,10 +252,12 @@ class ContextOptimizer:
         # Fast Ingest: Only process the last message if session is active
         ingest_start = time.time()
         if session_id in self.last_access and len(messages) > 1:
-            self.ingest_event(session_id, query_text, last_msg.get("role", "user"))
+            if last_msg.get("role") != "system":
+                self.ingest_event(session_id, query_text, last_msg.get("role", "user"))
         else:
             for m in messages:
-                self.ingest_event(session_id, m.get("content", ""), m.get("role", "user"))
+                if m.get("role") != "system":
+                    self.ingest_event(session_id, m.get("content", ""), m.get("role", "user"))
         ingest_time = (time.time() - ingest_start) * 1000
 
         # Search
