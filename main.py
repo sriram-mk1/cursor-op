@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
-from context_optimizer.engine import ContextOptimizer
+from context_optimizer.engine import ContextOptimizer, get_embedder
 
 
 # ============================================================================
@@ -41,13 +41,16 @@ log = setup_logging()
 # APP & OPTIMIZER
 # ============================================================================
 
-optimizer = ContextOptimizer(max_chars=30000)
+optimizer = ContextOptimizer()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.start_time = time.time()
-    log.info("🚀 Gateway v4.0.0 (Stable) started")
+    log.info("🚀 Gateway v5.0.0 (Hybrid RAG) starting...")
+    # Pre-load embedder
+    get_embedder()
     yield
+    log.info("🛑 Gateway shutting down")
 
 app = FastAPI(title="Context Optimizer", lifespan=lifespan)
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
@@ -75,10 +78,9 @@ def extract_api_key(authorization: str) -> str:
     return authorization.replace("Bearer ", "").strip()
 
 async def log_usage(generation_id: str, api_key: str, orig_count: int, opt_count: int):
-    """Background task for usage logging."""
     if not generation_id or not api_key: return
     try:
-        await asyncio.sleep(2.0) # Wait for OpenRouter
+        await asyncio.sleep(2.0)
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{OPENROUTER_API_BASE}/generation",
@@ -107,7 +109,6 @@ async def chat_completions(
     api_key = extract_api_key(authorization)
     if not api_key: raise HTTPException(status_code=401, detail="Missing API Key")
 
-    # Normalize messages
     messages = request.messages or []
     if request.prompt and not messages:
         messages = [{"role": "user", "content": request.prompt}]
@@ -115,12 +116,15 @@ async def chat_completions(
     orig_count = len(messages)
     
     # Optimize
-    if request.enable_optimization:
-        messages = optimizer.optimize(messages)
+    try:
+        if request.enable_optimization:
+            messages = optimizer.optimize(messages)
+    except Exception as e:
+        log.error(f"Optimization failed: {e}")
+        # Fallback to original messages if optimization fails
     
     opt_count = len(messages)
 
-    # Prepare OpenRouter request
     payload = request.model_dump(exclude_none=True)
     payload.pop("enable_optimization", None)
     payload["messages"] = messages
@@ -140,14 +144,12 @@ async def chat_completions(
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.post(f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers)
                 data = resp.json()
-                
                 if resp.status_code == 200:
                     gen_id = data.get("id")
                     background_tasks.add_task(log_usage, gen_id, api_key, orig_count, opt_count)
-                
                 return JSONResponse(content=data, status_code=resp.status_code)
     except Exception as e:
-        log.error(f"Error: {e}")
+        log.error(f"Forwarding error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
@@ -156,7 +158,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"name": "Context Optimizer Gateway", "version": "4.0.0"}
+    return {"name": "Hybrid RAG Gateway", "version": "5.0.0"}
 
 if __name__ == "__main__":
     import uvicorn
