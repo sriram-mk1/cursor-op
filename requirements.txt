@@ -9,3 +9,4 @@ pydantic>=2.0.0
 fastembed
 rank-bm25
 numpy
+

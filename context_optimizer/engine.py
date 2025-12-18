@@ -143,14 +143,10 @@ class SmartChunker:
 
 
 class HybridRetriever:
-    """
-    Hybrid retrieval: BM25 + FastEmbed semantic similarity.
-    """
+    """Streamlined Hybrid Retrieval (BM25 + Semantic)."""
     
-    def __init__(self, bm25_weight: float = 0.4, semantic_weight: float = 0.6, min_score: float = 0.3):
-        self.bm25_weight = bm25_weight
-        self.semantic_weight = semantic_weight
-        self.min_score = min_score
+    def __init__(self, bm25_weight: float = 0.4, semantic_weight: float = 0.6, min_score: float = 0.25):
+        self.bm25_weight, self.semantic_weight, self.min_score = bm25_weight, semantic_weight, min_score
     
     def retrieve(self, query: str, chunks: List[Chunk], top_k: int = 15) -> List[Chunk]:
         if not chunks: return []
@@ -158,154 +154,130 @@ class HybridRetriever:
         bm25_scores = self._bm25_scores(query, chunks)
         semantic_scores = self._semantic_scores(query, chunks)
         
-        # 1. Score all chunks
+        # Score and filter in one pass
+        scored = []
+        msg_counts = {}
+        
         for i, chunk in enumerate(chunks):
-            bm25 = bm25_scores[i] if bm25_scores else 0
-            semantic = semantic_scores[i] if semantic_scores else 0
+            # Calculate base score
+            s = (self.bm25_weight * (bm25_scores[i] if bm25_scores else 0) + 
+                 self.semantic_weight * (semantic_scores[i] if semantic_scores else 0))
             
-            # Recency is critical for flow
-            recency_boost = 1.5 if chunk.is_recent else 1.0
-            # Code is high signal
-            code_boost = 1.2 if chunk.is_code else 1.0
+            # Apply boosts
+            s *= (1.6 if chunk.is_recent else 1.0) * (1.25 if chunk.is_code else 1.0)
             
-            chunk.score = (self.bm25_weight * bm25 + self.semantic_weight * semantic) * recency_boost * code_boost
+            # Diversity penalty
+            if msg_counts.get(chunk.msg_index, 0) >= 3: s *= 0.6
+            
+            chunk.score = s
+            if s >= self.min_score or chunk.is_recent:
+                scored.append(chunk)
+                msg_counts[chunk.msg_index] = msg_counts.get(chunk.msg_index, 0) + 1
         
-        # 2. Select top chunks
-        sorted_chunks = sorted(chunks, key=lambda x: x.score, reverse=True)
-        selected = []
-        selected_indices = set()
+        # Sort and take top_k
+        scored.sort(key=lambda x: x.score, reverse=True)
+        selected = scored[:top_k]
         
-        for chunk in sorted_chunks:
-            if len(selected) >= top_k: break
-            if chunk.score >= self.min_score or chunk.is_recent:
-                selected.append(chunk)
-                selected_indices.add((chunk.msg_index, chunk.chunk_index))
-        
-        # 3. CONTEXT EXPANSION: If we have space, add neighbors of selected chunks
-        # This prevents "choppy" context by keeping related lines together
+        # Quick neighbor expansion for cohesion
+        indices = {(c.msg_index, c.chunk_index) for c in selected}
         expanded = list(selected)
-        if len(expanded) < top_k + 5:
-            for chunk in selected:
-                # Check neighbors in the same message
-                for offset in [-1, 1]:
-                    neighbor_idx = chunk.chunk_index + offset
-                    if neighbor_idx < 0: continue
-                    
-                    # Find neighbor in all_chunks
-                    for candidate in chunks:
-                        if candidate.msg_index == chunk.msg_index and candidate.chunk_index == neighbor_idx:
-                            if (candidate.msg_index, candidate.chunk_index) not in selected_indices:
-                                candidate.score *= 0.8 # Slightly lower priority for neighbors
-                                expanded.append(candidate)
-                                selected_indices.add((candidate.msg_index, candidate.chunk_index))
-                                break
-                if len(expanded) >= top_k + 5: break
-                
+        
+        for c in selected:
+            if len(expanded) >= top_k + 5: break
+            for offset in [-1, 1]:
+                nid = c.chunk_index + offset
+                if nid < 0: continue
+                # Find neighbor
+                for cand in chunks:
+                    if cand.msg_index == c.msg_index and cand.chunk_index == nid:
+                        if (cand.msg_index, cand.chunk_index) not in indices:
+                            expanded.append(cand)
+                            indices.add((cand.msg_index, cand.chunk_index))
+                            break
+        
         return expanded[:top_k + 5]
     
     def _bm25_scores(self, query: str, chunks: List[Chunk]) -> List[float]:
         try:
             from rank_bm25 import BM25Okapi
-            corpus = [chunk.content.lower().split() for chunk in chunks]
-            bm25 = BM25Okapi(corpus)
+            bm25 = BM25Okapi([c.content.lower().split() for c in chunks])
             scores = bm25.get_scores(query.lower().split())
-            max_s = max(scores) if max(scores) > 0 else 1
-            return [s / max_s for s in scores]
+            m = max(scores) if any(scores) else 1
+            return [s / m for s in scores]
         except: return [0.0] * len(chunks)
     
     def _semantic_scores(self, query: str, chunks: List[Chunk]) -> List[float]:
         try:
-            query_emb = get_embeddings([query])[0]
-            chunk_embs = get_embeddings([c.content for c in chunks])
-            query_norm = query_emb / np.linalg.norm(query_emb)
-            similarities = []
-            for emb in chunk_embs:
-                sim = np.dot(query_norm, emb / np.linalg.norm(emb))
-                similarities.append(float(sim))
-            return similarities
+            q_emb = get_embeddings([query])[0]
+            c_embs = get_embeddings([c.content for c in chunks])
+            q_norm = q_emb / np.linalg.norm(q_emb)
+            return [float(np.dot(q_norm, e / np.linalg.norm(e))) for e in c_embs]
         except: return [0.0] * len(chunks)
 
 
 class ContextOptimizer:
-    """
-    Main context optimization pipeline.
-    """
+    """Simplified Context Optimization Pipeline."""
     
     def __init__(self, max_context_chunks: int = 20):
-        self.chunker = SmartChunker(target_chunk_size=800) # Larger chunks for better coherence
-        self.retriever = HybridRetriever(bm25_weight=0.4, semantic_weight=0.6, min_score=0.25)
+        self.chunker = SmartChunker(target_chunk_size=800)
+        self.retriever = HybridRetriever()
         self.max_chunks = max_context_chunks
-        self.request_count = 0
+        self.THRESHOLD = 10000 # Chars
     
     def optimize(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Optimize the message context."""
-        self.request_count += 1
+        if len(messages) <= 3: return messages
         
-        if len(messages) <= 3:
-            return messages
+        # Adaptive Threshold
+        total_chars = sum(len(self._extract_text(m.get("content", ""))) for m in messages)
+        if total_chars < self.THRESHOLD: return messages
+            
+        # Split system/history/query
+        system = next((m for m in messages if m.get("role") == "system"), None)
+        history = [m for m in messages if m.get("role") != "system"]
+        query_msg = history.pop()
         
-        system_msg = None
-        other_messages = []
-        for msg in messages:
-            if msg.get("role") == "system":
-                if system_msg is None: system_msg = msg
-            else:
-                other_messages.append(msg)
-        
-        if not other_messages: return messages
-        
-        query_msg = other_messages[-1]
-        query_text = self._extract_text(query_msg.get("content", ""))
-        history = other_messages[:-1]
-        
-        if len(history) <= 2: return messages
-        
-        # Chunk history
+        # Chunking
         all_chunks = []
-        for idx, msg in enumerate(history):
-            content = self._extract_text(msg.get("content", ""))
-            role = msg.get("role", "unknown")
-            # Last 3 messages are "recent"
-            is_recent = idx >= len(history) - 3
-            all_chunks.extend(self.chunker.chunk_message(content, role, idx, is_recent))
+        for i, m in enumerate(history):
+            all_chunks.extend(self.chunker.chunk_message(
+                self._extract_text(m.get("content", "")), 
+                m.get("role", "user"), i, i >= len(history) - 3
+            ))
         
-        # Retrieve
-        relevant = self.retriever.retrieve(query_text, all_chunks, top_k=self.max_chunks)
-        relevant.sort(key=lambda c: (c.msg_index, c.chunk_index))
+        # Exponential Selectivity
+        k = self.max_chunks
+        if len(all_chunks) > 200: k = 8
+        elif len(all_chunks) > 100: k = 12
+            
+        # Retrieval & Reconstruction
+        relevant = sorted(self.retriever.retrieve(self._extract_text(query_msg.get("content", "")), all_chunks, k), 
+                         key=lambda c: (c.msg_index, c.chunk_index))
         
-        # Reconstruct
+        if not relevant: return messages
+        
+        ctx_body = []
+        last_idx = -1
+        for c in relevant:
+            if c.msg_index != last_idx:
+                ctx_body.append(f"\n{'='*20}\n### {c.role.upper()} ###")
+                last_idx = c.msg_index
+            ctx_body.append(c.content)
+            
         optimized = []
-        if system_msg: optimized.append(system_msg)
+        if system: optimized.append(system)
+        optimized.extend([
+            {"role": "user", "content": f"Summarized history for context:\n" + "\n".join(ctx_body)},
+            {"role": "assistant", "content": "Context received. How can I help?"},
+            query_msg
+        ])
         
-        if relevant:
-            context_parts = []
-            current_msg_idx = -1
-            
-            for chunk in relevant:
-                if chunk.msg_index != current_msg_idx:
-                    if context_parts: context_parts.append("-" * 10)
-                    context_parts.append(f"[{chunk.role.upper()}]:")
-                    current_msg_idx = chunk.msg_index
-                context_parts.append(chunk.content)
-            
-            optimized.append({
-                "role": "user",
-                "content": f"### RELEVANT CONVERSATION HISTORY ###\n\n" + "\n".join(context_parts)
-            })
-            optimized.append({
-                "role": "assistant", 
-                "content": "Understood. I have reviewed the relevant history. How can I help?"
-            })
-        
-        optimized.append(query_msg)
-        
-        # One-line summary log
-        log.info(f"✨ Optimized: {len(other_messages)}->{len(optimized)} msgs | {len(all_chunks)}->{len(relevant)} chunks")
-        
+        log.info(f"✨ {total_chars:,}ch | {len(history)+1}->{len(optimized)}ms | {len(all_chunks)}->{len(relevant)}ck")
         return optimized
     
     def _extract_text(self, content) -> str:
         if isinstance(content, str): return content
         if isinstance(content, list):
-            return " ".join([p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"])
+            return " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
         return str(content) if content else ""
+
+
