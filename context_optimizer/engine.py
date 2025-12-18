@@ -92,56 +92,80 @@ class SessionManager:
         self.db.commit()
 
     def hybrid_search(self, session_id: str, query_text: str, query_vec: Optional[np.ndarray], top_k: int = 45) -> List[Chunk]:
-        lex_ids = {}
+        lex_scores = {}
         try:
             q = RE_CLEAN.sub(' ', query_text).strip()
             if q:
                 cursor = self.db.execute(
-                    "SELECT id, bm25(chunks_fts) FROM chunks_fts WHERE session_id = ? AND chunks_fts MATCH ? LIMIT 80",
+                    "SELECT id, bm25(chunks_fts) FROM chunks_fts WHERE session_id = ? AND chunks_fts MATCH ? LIMIT 100",
                     (session_id, q)
                 )
                 for row in cursor:
-                    lex_ids[row[0]] = -row[1]
+                    lex_scores[row[0]] = -row[1]
         except: pass
 
-        # Get recent chunks for this session
+        # Vectorized Semantic Search
         cursor = self.db.execute(
-            "SELECT id, session_id, source, type, text, created_at, token_est, embed_vec FROM chunks_meta WHERE session_id = ? ORDER BY created_at DESC LIMIT 500",
+            "SELECT id, embed_vec, created_at FROM chunks_meta WHERE session_id = ? ORDER BY created_at DESC LIMIT 500",
             (session_id,)
         )
+        rows = cursor.fetchall()
+        if not rows: return []
         
-        all_chunks = []
-        semantic_scores = {}
-        q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9) if query_vec is not None else None
+        ids = [r[0] for r in rows]
+        vec_blobs = [r[1] for r in rows]
+        times = np.array([r[2] for r in rows])
         
-        for row in cursor:
-            vec_blob = row[7]
-            c = Chunk(id=row[0], session_id=row[1], source=row[2], type=row[3], text=row[4], created_at=row[5], token_est=row[6])
-            
-            if q_norm is not None and vec_blob:
-                c_vec = np.frombuffer(vec_blob, dtype=np.float32)
-                sim = np.dot(q_norm, c_vec / (np.linalg.norm(c_vec) + 1e-9))
-                semantic_scores[c.id] = float(sim)
-            
-            all_chunks.append(c)
+        sem_scores = {}
+        if query_vec is not None and any(vec_blobs):
+            # Fast matrix construction
+            valid_idx = [i for i, v in enumerate(vec_blobs) if v]
+            if valid_idx:
+                matrix = np.frombuffer(b''.join([vec_blobs[i] for i in valid_idx]), dtype=np.float32).reshape(len(valid_idx), -1)
+                q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9)
+                m_norms = np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9
+                sims = np.dot(matrix / m_norms, q_norm)
+                for i, idx in enumerate(valid_idx):
+                    sem_scores[ids[idx]] = float(sims[i])
 
-        def norm(d):
+        def norm_dict(d):
             if not d: return {}
             vs = list(d.values())
             mi, ma = min(vs), max(vs)
             if mi == ma: return {k: 1.0 for k in d}
-            return {k: (v - mi) / (ma - mi + 1e-9) for k, v in d.items()}
+            diff = ma - mi + 1e-9
+            return {k: (v - mi) / diff for k, v in d.items()}
 
-        lex_norm = norm(lex_ids)
-        sem_norm = norm(semantic_scores)
+        l_norm = norm_dict(lex_scores)
+        s_norm = norm_dict(sem_scores)
         
         now = time.time()
-        for c in all_chunks:
-            base = 0.3 * lex_norm.get(c.id, 0) + 0.7 * sem_norm.get(c.id, 0)
-            age_boost = 1.2 / (1.0 + (now - c.created_at) / 3600)
-            c.score = base * age_boost
+        scored_ids = []
+        for i, cid in enumerate(ids):
+            base = 0.3 * l_norm.get(cid, 0) + 0.7 * s_norm.get(cid, 0)
+            age_boost = 1.2 / (1.0 + (now - times[i]) / 3600)
+            score = base * age_boost
+            if score > 0.01:
+                scored_ids.append((cid, score))
+        
+        top_ids = sorted(scored_ids, key=lambda x: x[1], reverse=True)[:top_k]
+        if not top_ids: return []
+        
+        # Final fetch of full objects for top_k only
+        placeholders = ','.join(['?'] * len(top_ids))
+        id_map = {cid: score for cid, score in top_ids}
+        cursor = self.db.execute(
+            f"SELECT id, session_id, source, type, text, created_at, token_est FROM chunks_meta WHERE id IN ({placeholders})",
+            [x[0] for x in top_ids]
+        )
+        
+        final = []
+        for r in cursor:
+            c = Chunk(id=r[0], session_id=r[1], source=r[2], type=r[3], text=r[4], created_at=r[5], token_est=r[6])
+            c.score = id_map.get(c.id, 0)
+            final.append(c)
             
-        return sorted([c for c in all_chunks if c.score > 0.02], key=lambda x: x.score, reverse=True)[:top_k]
+        return sorted(final, key=lambda x: x.score, reverse=True)
 
     def terminate_session(self, session_id: str):
         self.db.execute("DELETE FROM chunks_fts WHERE session_id = ?", (session_id,))
@@ -149,7 +173,7 @@ class SessionManager:
         self.db.commit()
 
 class ContextOptimizer:
-    """Instant-start, Turbo-charged V1 Pipeline."""
+    """Extreme Performance V1 Pipeline."""
     def __init__(self):
         self.sessions = SessionManager()
         self.seen_messages = {} # session_id -> set of msg hashes
@@ -157,9 +181,8 @@ class ContextOptimizer:
 
     def _cleanup(self):
         now = time.time()
-        to_kill = [sid for sid, ts in self.last_access.items() if now - ts > 1800] # 30m
+        to_kill = [sid for sid, ts in self.last_access.items() if now - ts > 600] # 10m cleanup
         for sid in to_kill:
-            log.info(f"🌱 Germinating session {sid}")
             self.sessions.terminate_session(sid)
             self.seen_messages.pop(sid, None)
             self.last_access.pop(sid, None)
@@ -168,33 +191,33 @@ class ContextOptimizer:
         if not content: return
         self.last_access[session_id] = time.time()
         
+        # Fast normalization
         if isinstance(content, list):
             text = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
         else:
             text = str(content)
         
-        if "RELEVANT SESSION CONTEXT" in text or "url: /context/session.toon" in text: return
-        if not text.strip(): return
+        if not text or "RELEVANT SESSION CONTEXT" in text[:100]: return
         
         msg_hash = hashlib.md5(text.encode()).hexdigest()
         if session_id not in self.seen_messages: self.seen_messages[session_id] = set()
         if msg_hash in self.seen_messages[session_id]: return
         self.seen_messages[session_id].add(msg_hash)
         
-        raw_chunks = RE_BLOCKS.split(text)
+        # Fast chunking
+        raw_chunks = [p.strip() for p in RE_BLOCKS.split(text) if p.strip()]
         to_ingest = []
         to_embed = []
         
         for p in raw_chunks:
-            p = p.strip()
-            if not p or p.startswith("---") or p.startswith("# Session Context"): continue
+            if p.startswith("---") or p.startswith("# Session Context"): continue
             
+            p_hash = hashlib.md5(p.encode()).hexdigest()
             ctype = "exploratory"
-            if p.startswith("```") or p.startswith("#"): ctype = "authoritative"
+            if p[0] in ('`', '#'): ctype = "authoritative"
             elif "error" in p.lower() or "traceback" in p.lower(): ctype = "diagnostic"
             elif source in ("chat", "user", "assistant"): ctype = "historical"
             
-            p_hash = hashlib.md5(p.encode()).hexdigest()
             chunk = Chunk(id=f"{session_id}-{p_hash[:16]}-{ctype[:3]}", session_id=session_id, source=source, type=ctype, text=p)
             
             if p_hash in _embedding_cache:
@@ -204,10 +227,8 @@ class ContextOptimizer:
             
             to_ingest.append(chunk)
 
-        # Batch Embedding
         if to_embed:
-            texts = [x[0] for x in to_embed]
-            vecs = list(_embedder.embed(texts))
+            vecs = list(_embedder.embed([x[0] for x in to_embed]))
             for i, (p, p_hash, chunk) in enumerate(to_embed):
                 v = vecs[i][:128].tolist()
                 chunk.embed_vec = v
@@ -219,20 +240,22 @@ class ContextOptimizer:
         start_time = time.time()
         self._cleanup()
         
-        query_text = str(messages[-1].get("content", ""))
+        last_msg = messages[-1]
+        query_text = str(last_msg.get("content", ""))
         query_hash = hashlib.md5(query_text.encode()).hexdigest()
         cache_key = (session_id, query_hash)
         
         if cache_key in _retrieval_cache:
             cached_msgs, ts = _retrieval_cache[cache_key]
-            if time.time() - ts < 30:
-                log.info(f"⚡️ Cache Hit [{session_id}]")
-                return cached_msgs
+            if time.time() - ts < 15: return cached_msgs
 
-        # Ingest
+        # Fast Ingest: Only process the last message if session is active
         ingest_start = time.time()
-        for m in messages:
-            self.ingest_event(session_id, m.get("content", ""), m.get("role", "user"))
+        if session_id in self.last_access and len(messages) > 1:
+            self.ingest_event(session_id, query_text, last_msg.get("role", "user"))
+        else:
+            for m in messages:
+                self.ingest_event(session_id, m.get("content", ""), m.get("role", "user"))
         ingest_time = (time.time() - ingest_start) * 1000
 
         # Search
@@ -253,12 +276,12 @@ class ContextOptimizer:
         if system: optimized.append(system)
         if toon_context:
             optimized.append({"role": "system", "content": f"--- SESSION CONTEXT (TOON) ---\n{toon_context}"})
-        optimized.append(messages[-1])
+        optimized.append(last_msg)
         
         pack_time = (time.time() - pack_start) * 1000
         total_time = (time.time() - start_time) * 1000
 
-        log.info(f"✨ [{session_id}] | 📦 {len(relevant)} chunks | ⚡️ {total_time:.0f}ms (I:{ingest_time:.0f} S:{search_time:.0f} P:{pack_time:.0f})")
+        log.info(f"⚡️ [{session_id}] | {len(relevant)} chunks | {total_time:.0f}ms (I:{ingest_time:.0f} S:{search_time:.0f} P:{pack_time:.0f})")
         
         _retrieval_cache[cache_key] = (optimized, time.time())
         return optimized
@@ -269,14 +292,13 @@ class ContextOptimizer:
         for c in chunks:
             if c.type not in tree: tree[c.type] = {}
             if c.source not in tree[c.type]: tree[c.type][c.source] = []
-            tree[c.type][c.source].append(c)
+            tree[c.type][c.source].append(c.text)
             
         lines = ["# Session Summary", ""]
         for ctype, sources in tree.items():
-            lines.append(f"{ctype}[{sum(len(cs) for cs in sources.values())}]:")
-            for source, cs in sources.items():
-                lines.append(f"  {source}[{len(cs)}]:")
-                for c in cs:
-                    txt = c.text.replace('"', '\\"').replace('\n', ' ')
-                    lines.append(f"    - \"{txt}\"")
+            lines.append(f"{ctype}:")
+            for source, texts in sources.items():
+                lines.append(f"  {source}:")
+                for txt in texts:
+                    lines.append(f"    - \"{txt.replace(chr(10), ' ')}\"")
         return "\n".join(lines)
