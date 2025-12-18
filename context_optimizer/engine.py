@@ -3,8 +3,9 @@ import sqlite3
 import logging
 import hashlib
 import time
-from typing import List, Dict, Any, Optional, Set, Tuple
-from dataclasses import dataclass, field
+import json
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass, field, asdict
 import numpy as np
 from simhash import Simhash
 import tiktoken
@@ -19,7 +20,7 @@ def get_embedder():
     if _embedder is None:
         try:
             from fastembed import TextEmbedding
-            log.info("🔄 Loading Snowflake/snowflake-arctic-embed-xs...")
+            log.info("🔄 Loading Snowflake/snowflake-arctic-embed-xs (dim=128)...")
             _embedder = TextEmbedding(model_name="Snowflake/snowflake-arctic-embed-xs")
             log.info("✅ Embedder loaded")
         except Exception as e:
@@ -29,317 +30,252 @@ def get_embedder():
 @dataclass
 class Chunk:
     id: str
-    content: str
-    role: str
-    msg_index: int
-    chunk_index: int
-    type: str = "text" # text, code, log, heading
-    source_file: Optional[str] = None
-    timestamp: float = field(default_factory=time.time)
-    tokens: int = 0
-    score: float = 0.0
-    embedding: Optional[np.ndarray] = None
-    simhash: Optional[int] = None
+    session_id: str
+    source: str  # tool name / filename / chat
+    type: str    # authoritative | diagnostic | exploratory | historical
+    text: str
+    created_at: float = field(default_factory=time.time)
+    token_est: int = 0
+    lex_terms: str = ""
+    embed_vec: Optional[List[float]] = None
+
+    def to_dict(self):
+        return asdict(self)
+
+class SessionManager:
+    """Manages multi-session chunk storage and retrieval using SQLite."""
+    
+    def __init__(self, db_path: str = ":memory:"):
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self._setup_db()
+        self.encoder = tiktoken.get_encoding("cl100k_base")
+
+    def _setup_db(self):
+        # FTS5 for lexical search
+        self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, session_id UNINDEXED, text, lex_terms)")
+        # Metadata table
+        self.db.execute("""
+            CREATE TABLE IF NOT EXISTS chunks_meta (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                source TEXT,
+                type TEXT,
+                text TEXT,
+                created_at REAL,
+                token_est INTEGER,
+                embed_vec BLOB
+            )
+        """)
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_session ON chunks_meta(session_id)")
+        self.db.commit()
+
+    def ingest_chunk(self, chunk: Chunk):
+        # Normalize text for lexical terms
+        lex = re.sub(r'[^\w\s]', ' ', chunk.text).lower()
+        chunk.lex_terms = lex
+        chunk.token_est = len(self.encoder.encode(chunk.text))
+        
+        # Store in FTS
+        self.db.execute(
+            "INSERT INTO chunks_fts(id, session_id, text, lex_terms) VALUES (?, ?, ?, ?)",
+            (chunk.id, chunk.session_id, chunk.text, chunk.lex_terms)
+        )
+        
+        # Store in Meta
+        vec_blob = np.array(chunk.embed_vec, dtype=np.float32).tobytes() if chunk.embed_vec else None
+        self.db.execute(
+            "INSERT INTO chunks_meta(id, session_id, source, type, text, created_at, token_est, embed_vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (chunk.id, chunk.session_id, chunk.source, chunk.type, chunk.text, chunk.created_at, chunk.token_est, vec_blob)
+        )
+        self.db.commit()
+
+    def get_session_chunks(self, session_id: str, limit: int = 100) -> List[Chunk]:
+        cursor = self.db.execute(
+            "SELECT id, session_id, source, type, text, created_at, token_est, embed_vec FROM chunks_meta WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+            (session_id, limit)
+        )
+        chunks = []
+        for row in cursor:
+            vec = np.frombuffer(row[7], dtype=np.float32).tolist() if row[7] else None
+            chunks.append(Chunk(
+                id=row[0], session_id=row[1], source=row[2], type=row[3],
+                text=row[4], created_at=row[5], token_est=row[6], embed_vec=vec
+            ))
+        return chunks
+
+    def hybrid_search(self, session_id: str, query_text: str, query_vec: Optional[np.ndarray], top_k: int = 20) -> List[Chunk]:
+        # 1. Lexical Search (BM25)
+        lex_ids = {}
+        try:
+            q = re.sub(r'[^\w\s]', ' ', query_text).strip()
+            if q:
+                cursor = self.db.execute(
+                    "SELECT id, bm25(chunks_fts) FROM chunks_fts WHERE session_id = ? AND chunks_fts MATCH ? LIMIT 50",
+                    (session_id, q)
+                )
+                for row in cursor:
+                    lex_ids[row[0]] = -row[1] # Lower is better
+        except: pass
+
+        # 2. Semantic Search (if vec provided)
+        all_session_chunks = self.get_session_chunks(session_id, limit=500)
+        semantic_scores = {}
+        if query_vec is not None:
+            q_norm = query_vec / np.linalg.norm(query_vec)
+            for c in all_session_chunks:
+                if c.embed_vec:
+                    c_vec = np.array(c.embed_vec)
+                    sim = np.dot(q_norm, c_vec / np.linalg.norm(c_vec))
+                    semantic_scores[c.id] = float(sim)
+
+        # 3. Fusion
+        results = []
+        # Normalize scores
+        def norm(d):
+            if not d: return {}
+            vs = list(d.values())
+            mi, ma = min(vs), max(vs)
+            if mi == ma: return {k: 1.0 for k in d}
+            return {k: (v - mi) / (ma - mi) for k, v in d.items()}
+
+        lex_norm = norm(lex_ids)
+        sem_norm = norm(semantic_scores)
+        
+        combined = {}
+        for c in all_session_chunks:
+            score = 0.4 * lex_norm.get(c.id, 0) + 0.6 * sem_norm.get(c.id, 0)
+            if score > 0:
+                c.score = score
+                combined[c.id] = c
+        
+        return sorted(combined.values(), key=lambda x: x.score, reverse=True)[:top_k]
 
 class SmartChunker:
-    """Structure-aware chunking."""
-    
-    CODE_BLOCK_RE = re.compile(r'```[\s\S]*?```')
-    STACK_TRACE_RE = re.compile(r'(\w+\.py", line \d+, in [\s\S]+?\n\s+[\s\S]+?\n)')
-    HEADING_RE = re.compile(r'^(#{1,6}\s+.+)$', re.MULTILINE)
+    """Simple, reliable structure-aware chunking."""
     
     def __init__(self, target_tokens: int = 500):
         self.target_tokens = target_tokens
         self.encoder = tiktoken.get_encoding("cl100k_base")
 
-    def chunk_message(self, content: str, role: str, msg_idx: int) -> List[Chunk]:
-        if not content: return []
+    def chunk_and_classify(self, text: str, source: str) -> List[Tuple[str, str]]:
+        if not text: return []
         
+        # Split by logical blocks: code, headings, or double newlines
+        parts = re.split(r'(\n#{1,6}\s+.*|```[\s\S]*?```|\n\n)', text)
         chunks = []
         
-        # 1. Extract structural elements
-        # We'll use a simple strategy: find all blocks, then fill in the gaps
-        blocks = []
-        for match in self.CODE_BLOCK_RE.finditer(content):
-            blocks.append((match.start(), match.end(), "code"))
-        for match in self.STACK_TRACE_RE.finditer(content):
-            blocks.append((match.start(), match.end(), "log"))
-        for match in self.HEADING_RE.finditer(content):
-            blocks.append((match.start(), match.end(), "heading"))
+        for p in parts:
+            p = p.strip()
+            if not p: continue
             
-        blocks.sort()
-        
-        # Merge overlapping blocks (if any)
-        merged = []
-        if blocks:
-            curr_start, curr_end, curr_type = blocks[0]
-            for next_start, next_end, next_type in blocks[1:]:
-                if next_start < curr_end:
-                    curr_end = max(curr_end, next_end)
-                else:
-                    merged.append((curr_start, curr_end, curr_type))
-                    curr_start, curr_end, curr_type = next_start, next_end, next_type
-            merged.append((curr_start, curr_end, curr_type))
+            ctype = "exploratory"
+            if p.startswith("```"): ctype = "authoritative"
+            elif p.startswith("#"): ctype = "authoritative"
+            elif "error" in p.lower() or "traceback" in p.lower(): ctype = "diagnostic"
+            elif source == "chat": ctype = "historical"
             
-        # 2. Process blocks and gaps
-        last_pos = 0
-        chunk_idx = 0
-        
-        def add_chunk(text: str, ctype: str):
-            nonlocal chunk_idx
-            text = text.strip()
-            if not text: return
-            
-            tokens = len(self.encoder.encode(text))
-            # If text is too large, split it further (simple split for now)
-            if tokens > self.target_tokens * 1.5:
-                parts = [text[i:i+2000] for i in range(0, len(text), 2000)]
-                for p in parts:
-                    cid = hashlib.md5(f"{msg_idx}-{chunk_idx}-{p[:50]}".encode()).hexdigest()
-                    chunks.append(Chunk(id=cid, content=p, role=role, msg_index=msg_idx, chunk_index=chunk_idx, type=ctype, tokens=len(self.encoder.encode(p))))
-                    chunk_idx += 1
-            else:
-                cid = hashlib.md5(f"{msg_idx}-{chunk_idx}-{text[:50]}".encode()).hexdigest()
-                chunks.append(Chunk(id=cid, content=text, role=role, msg_index=msg_idx, chunk_index=chunk_idx, type=ctype, tokens=tokens))
-                chunk_idx += 1
-
-        for start, end, ctype in merged:
-            # Gap before block
-            if start > last_pos:
-                add_chunk(content[last_pos:start], "text")
-            # The block itself
-            add_chunk(content[start:end], ctype)
-            last_pos = end
-            
-        # Final gap
-        if last_pos < len(content):
-            add_chunk(content[last_pos:], "text")
+            chunks.append((p, ctype))
             
         return chunks
 
-class HybridRetriever:
-    """SQLite FTS5 + FastEmbed Hybrid Retrieval."""
-    
-    def __init__(self):
-        self.db = sqlite3.connect(":memory:", check_same_thread=False)
-        self.db.execute("CREATE VIRTUAL TABLE chunks_fts USING fts5(id UNINDEXED, content, role UNINDEXED)")
-        self.chunk_map = {}
-
-    def index_chunks(self, chunks: List[Chunk]):
-        embedder = get_embedder()
-        texts = [c.content for c in chunks if not c.embedding]
-        
-        if texts and embedder:
-            embeddings = list(embedder.embed(texts))
-            text_idx = 0
-            for c in chunks:
-                if not c.embedding:
-                    c.embedding = embeddings[text_idx]
-                    text_idx += 1
-        
-        for c in chunks:
-            if c.id not in self.chunk_map:
-                self.db.execute("INSERT INTO chunks_fts(id, content, role) VALUES (?, ?, ?)", (c.id, c.content, c.role))
-                self.chunk_map[c.id] = c
-                # Compute SimHash for dedup
-                c.simhash = Simhash(c.content).value
-
-    def retrieve(self, query: str, top_k: int = 20) -> List[Chunk]:
-        # 1. Lexical Search (BM25)
-        bm25_results = []
-        try:
-            # Clean query for FTS
-            clean_query = re.sub(r'[^\w\s]', ' ', query).strip()
-            if clean_query:
-                cursor = self.db.execute(
-                    "SELECT id, bm25(chunks_fts) as score FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score LIMIT 50",
-                    (clean_query,)
-                )
-                for row in cursor:
-                    cid, score = row
-                    if cid in self.chunk_map:
-                        chunk = self.chunk_map[cid]
-                        # BM25 in SQLite is lower = better, we normalize later
-                        bm25_results.append((chunk, -score))
-        except Exception as e:
-            log.warning(f"BM25 search failed: {e}")
-
-        # 2. Semantic Search
-        semantic_results = []
-        embedder = get_embedder()
-        if embedder:
-            query_emb = list(embedder.embed([query]))[0]
-            query_norm = query_emb / np.linalg.norm(query_emb)
-            
-            for chunk in self.chunk_map.values():
-                if chunk.embedding is not None:
-                    sim = np.dot(query_norm, chunk.embedding / np.linalg.norm(chunk.embedding))
-                    semantic_results.append((chunk, float(sim)))
-            
-            semantic_results.sort(key=lambda x: x[1], reverse=True)
-            semantic_results = semantic_results[:50]
-
-        # 3. RRF (Reciprocal Rank Fusion) or Simple Union + Normalize
-        # We'll use a simple union with normalized scores
-        combined = {}
-        
-        def normalize(results):
-            if not results: return {}
-            min_s = min(r[1] for r in results)
-            max_s = max(r[1] for r in results)
-            if max_s == min_s: return {r[0].id: 1.0 for r in results}
-            return {r[0].id: (r[1] - min_s) / (max_s - min_s) for r in results}
-
-        bm25_norm = normalize(bm25_results)
-        semantic_norm = normalize(semantic_results)
-        
-        all_ids = set(bm25_norm.keys()) | set(semantic_norm.keys())
-        for cid in all_ids:
-            score = 0.4 * bm25_norm.get(cid, 0) + 0.6 * semantic_norm.get(cid, 0)
-            chunk = self.chunk_map[cid]
-            chunk.score = score
-            combined[cid] = chunk
-            
-        return sorted(combined.values(), key=lambda x: x.score, reverse=True)[:top_k]
-
-class DedupManager:
-    """SimHash based deduplication."""
-    
-    def dedup(self, chunks: List[Chunk], threshold: int = 3) -> List[Chunk]:
-        if not chunks: return []
-        
-        unique = []
-        hashes = []
-        
-        for c in chunks:
-            is_dup = False
-            c_hash = Simhash(c.content)
-            for h in hashes:
-                if c_hash.distance(h) <= threshold:
-                    is_dup = True
-                    break
-            if not is_dup:
-                unique.append(c)
-                hashes.append(c_hash)
-        return unique
-
-class PromptPacker:
-    """Budget-aware packing with coverage guardrails."""
-    
-    def __init__(self, total_budget: int = 4000):
-        self.total_budget = total_budget
-
-    def pack(self, query_chunk: Chunk, recent_chunks: List[Chunk], relevant_chunks: List[Chunk]) -> List[Chunk]:
-        packed = []
-        current_tokens = 0
-        
-        # 1. Anchors (Query + Last 2 turns)
-        anchors = [query_chunk] + recent_chunks[:4] # Roughly last 2 turns
-        for c in anchors:
-            if current_tokens + c.tokens <= self.total_budget:
-                packed.append(c)
-                current_tokens += c.tokens
-        
-        # 2. Coverage Guardrails
-        # Ensure at least one of each type if available and not already in packed
-        selected_ids = {c.id for c in packed}
-        
-        types_needed = {"code", "log"}
-        for ctype in types_needed:
-            for c in relevant_chunks:
-                if c.type == ctype and c.id not in selected_ids:
-                    if current_tokens + c.tokens <= self.total_budget:
-                        packed.append(c)
-                        current_tokens += c.tokens
-                        selected_ids.add(c.id)
-                        break
-        
-        # 3. Fill remaining budget by score
-        for c in relevant_chunks:
-            if c.id not in selected_ids:
-                if current_tokens + c.tokens <= self.total_budget:
-                    packed.append(c)
-                    current_tokens += c.tokens
-                    selected_ids.add(c.id)
-                    
-        # Sort by original flow for LLM coherence
-        packed.sort(key=lambda x: (x.msg_index, x.chunk_index))
-        return packed
-
 class ContextOptimizer:
-    """The New Architecture Orchestrator."""
+    """V1 Pipeline Orchestrator."""
     
     def __init__(self):
+        self.sessions = SessionManager()
         self.chunker = SmartChunker()
-        self.retriever = HybridRetriever()
-        self.deduper = DedupManager()
-        self.packer = PromptPacker(total_budget=6000)
-        self.all_chunks = []
-        self.query_cache = {}
+        self.seen_messages = {} # session_id -> set of msg hashes
 
-    def optimize(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if len(messages) <= 2: return messages
+    def ingest_event(self, session_id: str, text: str, source: str):
+        if not text: return
         
-        # 1. Extract and Index
-        system_msg = next((m for m in messages if m.get("role") == "system"), None)
-        history = [m for m in messages if m.get("role") != "system"]
-        query_msg = history.pop()
+        msg_hash = hashlib.md5(text.encode()).hexdigest()
+        if session_id not in self.seen_messages:
+            self.seen_messages[session_id] = set()
+        if msg_hash in self.seen_messages[session_id]:
+            return
+        self.seen_messages[session_id].add(msg_hash)
         
-        # Incremental indexing
-        new_chunks = []
-        # We only re-chunk the last few messages to be fast, but for simplicity here we chunk all
-        # In a real session, we'd cache chunks per message ID
-        all_history_chunks = []
-        for i, m in enumerate(history):
-            content = m.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(p.get("text", "") for p in content if p.get("type") == "text")
-            all_history_chunks.extend(self.chunker.chunk_message(content, m.get("role", "user"), i))
+        raw_chunks = self.chunker.chunk_and_classify(text, source)
+        embedder = get_embedder()
+        for content, ctype in raw_chunks:
+            vec = None
+            if embedder:
+                vec = list(embedder.embed([content]))[0][:128].tolist()
             
-        # Dedup history
-        clean_history = self.deduper.dedup(all_history_chunks)
-        self.retriever.index_chunks(clean_history)
-        
-        # 2. Retrieve
-        query_text = query_msg.get("content", "")
+            chunk = Chunk(
+                id=hashlib.md5(f"{session_id}-{content[:100]}".encode()).hexdigest(),
+                session_id=session_id,
+                source=source,
+                type=ctype,
+                text=content,
+                embed_vec=vec
+            )
+            self.sessions.ingest_chunk(chunk)
+
+    def build_query(self, messages: List[Dict[str, Any]]) -> Tuple[str, Optional[np.ndarray]]:
+        # Just use the last message for the query to keep it clean
+        last_msg = messages[-1]
+        query_text = last_msg.get("content", "")
         if isinstance(query_text, list):
             query_text = " ".join(p.get("text", "") for p in query_text if p.get("type") == "text")
             
-        # Cache check
-        if query_text in self.query_cache and time.time() - self.query_cache[query_text][1] < 60:
-            relevant = self.query_cache[query_text][0]
-        else:
-            relevant = self.retriever.retrieve(query_text, top_k=30)
-            self.query_cache[query_text] = (relevant, time.time())
+        embedder = get_embedder()
+        query_vec = None
+        if embedder and query_text:
+            query_vec = list(embedder.embed([query_text]))[0][:128]
             
-        # 3. Pack
-        query_chunk = Chunk(id="query", content=query_text, role="user", msg_index=999, chunk_index=0, tokens=len(tiktoken.get_encoding("cl100k_base").encode(query_text)))
-        recent = clean_history[-10:] # Last bits of history
+        return query_text, query_vec
+
+    def optimize(self, session_id: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Ingest ALL messages in the current request to ensure they are indexed for this session
+        for m in messages:
+            self.ingest_event(session_id, m.get("content", ""), m.get("role", "user"))
         
-        packed = self.packer.pack(query_chunk, recent, relevant)
+        # Build query
+        query_text, query_vec = self.build_query(messages)
         
-        # 4. Reconstruct
-        ctx_parts = []
-        last_msg_idx = -1
-        for c in packed:
-            if c.id == "query": continue
-            if c.msg_index != last_msg_idx:
-                ctx_parts.append(f"\n--- {c.role.upper()} ---")
-                last_msg_idx = c.msg_index
-            ctx_parts.append(c.content)
-            
+        # Retrieve
+        relevant = self.sessions.hybrid_search(session_id, query_text, query_vec, top_k=25)
+        
+        # TOON Reconstruction
+        toon_context = self._to_toon(relevant)
+        
         optimized = []
-        if system_msg: optimized.append(system_msg)
+        system = next((m for m in messages if m.get("role") == "system"), None)
+        if system: optimized.append(system)
         
-        optimized.append({
-            "role": "user",
-            "content": f"Context for current request:\n" + "\n".join(ctx_parts)
-        })
-        optimized.append({
-            "role": "assistant",
-            "content": "I have the context. Ready for your request."
-        })
-        optimized.append(query_msg)
+        if toon_context:
+            optimized.append({
+                "role": "system", 
+                "content": (
+                    "CRITICAL: You are an AI with access to a session history. "
+                    "The following context is retrieved from the current session. "
+                    "Use it to answer the user's request accurately. "
+                    "If the user asks about something in the history, it IS in the context below.\n\n"
+                    + toon_context
+                )
+            })
         
-        log.info(f"✨ Hybrid RAG: {len(history)+1}->{len(optimized)} msgs | {len(packed)} chunks")
+        optimized.append(messages[-1]) # Current query
+        
+        log.info(f"✨ V1 RAG [{session_id}]: {len(relevant)} chunks retrieved")
         return optimized
+
+    def _to_toon(self, chunks: List[Chunk]) -> str:
+        if not chunks: return ""
+        lines = ["---", "url: /context/session.toon", "---", "# Session Context", ""]
+        
+        # Group by type
+        by_type = {}
+        for c in chunks:
+            if c.type not in by_type: by_type[c.type] = []
+            by_type[c.type].append(c)
+            
+        for ctype, cs in by_type.items():
+            lines.append(f"{ctype}[{len(cs)}]:")
+            for c in cs:
+                # TOON format: source: "text"
+                text = c.text.replace('"', '\\"').replace('\n', ' ')
+                lines.append(f"  - {c.source}: \"{text}\"")
+        return "\n".join(lines)

@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for SQLite and build tools
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     sqlite3 \
