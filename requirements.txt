@@ -7,3 +7,4 @@ fastembed
 simhash
 numpy
 tiktoken
+supabase
