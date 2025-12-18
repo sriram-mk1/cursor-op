@@ -75,16 +75,16 @@ class SessionManager:
         chunk.lex_terms = lex
         chunk.token_est = len(self.encoder.encode(chunk.text))
         
-        # Store in FTS
+        # Store in FTS (Ignore if exists)
         self.db.execute(
-            "INSERT INTO chunks_fts(id, session_id, text, lex_terms) VALUES (?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO chunks_fts(id, session_id, text, lex_terms) VALUES (?, ?, ?, ?)",
             (chunk.id, chunk.session_id, chunk.text, chunk.lex_terms)
         )
         
-        # Store in Meta
+        # Store in Meta (Ignore if exists)
         vec_blob = np.array(chunk.embed_vec, dtype=np.float32).tobytes() if chunk.embed_vec else None
         self.db.execute(
-            "INSERT INTO chunks_meta(id, session_id, source, type, text, created_at, token_est, embed_vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO chunks_meta(id, session_id, source, type, text, created_at, token_est, embed_vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (chunk.id, chunk.session_id, chunk.source, chunk.type, chunk.text, chunk.created_at, chunk.token_est, vec_blob)
         )
         self.db.commit()
@@ -186,8 +186,16 @@ class ContextOptimizer:
         self.chunker = SmartChunker()
         self.seen_messages = {} # session_id -> set of msg hashes
 
-    def ingest_event(self, session_id: str, text: str, source: str):
-        if not text: return
+    def ingest_event(self, session_id: str, content: Any, source: str):
+        if not content: return
+        
+        # Normalize content to string
+        if isinstance(content, list):
+            text = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
+        else:
+            text = str(content)
+            
+        if not text.strip(): return
         
         msg_hash = hashlib.md5(text.encode()).hexdigest()
         if session_id not in self.seen_messages:
@@ -198,17 +206,21 @@ class ContextOptimizer:
         
         raw_chunks = self.chunker.chunk_and_classify(text, source)
         embedder = get_embedder()
-        for content, ctype in raw_chunks:
+        for content_part, ctype in raw_chunks:
             vec = None
             if embedder:
-                vec = list(embedder.embed([content]))[0][:128].tolist()
+                vec = list(embedder.embed([content_part]))[0][:128].tolist()
+            
+            # Use a more robust ID: session + content hash + type
+            c_hash = hashlib.md5(content_part.encode()).hexdigest()
+            chunk_id = f"{session_id}-{c_hash[:16]}-{ctype[:3]}"
             
             chunk = Chunk(
-                id=hashlib.md5(f"{session_id}-{content[:100]}".encode()).hexdigest(),
+                id=chunk_id,
                 session_id=session_id,
                 source=source,
                 type=ctype,
-                text=content,
+                text=content_part,
                 embed_vec=vec
             )
             self.sessions.ingest_chunk(chunk)
