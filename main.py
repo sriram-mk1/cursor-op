@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
-from context_optimizer.engine import ContextOptimizer, get_embedder
+from context_optimizer.engine import ContextOptimizer
 
 # Clean Logging
 class ToonLog(logging.Formatter):
@@ -33,7 +33,6 @@ optimizer = ContextOptimizer()
 async def lifespan(app: FastAPI):
     app.state.start_time = time.time()
     log.info("🚀 V1 Session Gateway starting...")
-    get_embedder()
     yield
     log.info("🛑 Gateway stopped")
 

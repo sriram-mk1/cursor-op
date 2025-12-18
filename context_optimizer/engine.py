@@ -4,30 +4,38 @@ import logging
 import hashlib
 import time
 import json
+import threading
 from typing import List, Dict, Any, Optional, Tuple, Set
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 import numpy as np
-from simhash import Simhash
 import tiktoken
 
 log = logging.getLogger("gateway")
 
-# Global model and caches
-_embedder = None
-_embedding_cache = {} # text_hash -> vector
-_retrieval_cache = {} # (session_id, query_hash) -> optimized_msgs
+# --- Pre-compiled Globals ---
+RE_CLEAN = re.compile(r'[^\w\s]')
+RE_BLOCKS = re.compile(r'(\n#{1,6}\s+.*|```[\s\S]*?```|\n\n)')
+ENCODER = tiktoken.get_encoding("cl100k_base")
 
-def get_embedder():
+# --- Global Model & Caches ---
+_embedder = None
+_embedder_ready = threading.Event()
+_embedding_cache = {}
+_retrieval_cache = {}
+
+def _load_model_bg():
     global _embedder
-    if _embedder is None:
-        try:
-            from fastembed import TextEmbedding
-            log.info("🔄 Loading Snowflake/snowflake-arctic-embed-xs (dim=128)...")
-            _embedder = TextEmbedding(model_name="Snowflake/snowflake-arctic-embed-xs")
-            log.info("✅ Embedder loaded")
-        except Exception as e:
-            log.error(f"❌ Failed to load embedder: {e}")
-    return _embedder
+    try:
+        from fastembed import TextEmbedding
+        log.info("🔄 Loading Snowflake/snowflake-arctic-embed-xs in background...")
+        _embedder = TextEmbedding(model_name="Snowflake/snowflake-arctic-embed-xs")
+        _embedder_ready.set()
+        log.info("✅ Embedder ready")
+    except Exception as e:
+        log.error(f"❌ Failed to load embedder: {e}")
+
+# Start loading immediately
+threading.Thread(target=_load_model_bg, daemon=True).start()
 
 @dataclass
 class Chunk:
@@ -38,19 +46,17 @@ class Chunk:
     text: str
     created_at: float = field(default_factory=time.time)
     token_est: int = 0
-    lex_terms: str = ""
     embed_vec: Optional[List[float]] = None
     score: float = 0.0
 
 class SessionManager:
-    """High-performance multi-session storage."""
-    def __init__(self, db_path: str = ":memory:"):
-        self.db = sqlite3.connect(db_path, check_same_thread=False)
+    """Ultra-fast in-memory session storage."""
+    def __init__(self):
+        self.db = sqlite3.connect(":memory:", check_same_thread=False)
         self._setup_db()
-        self.encoder = tiktoken.get_encoding("cl100k_base")
 
     def _setup_db(self):
-        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA journal_mode=OFF") # Max speed for in-memory
         self.db.execute("PRAGMA synchronous=OFF")
         self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, session_id UNINDEXED, text, lex_terms)")
         self.db.execute("""
@@ -68,41 +74,27 @@ class SessionManager:
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_session ON chunks_meta(session_id)")
         self.db.commit()
 
-    def ingest_chunk(self, chunk: Chunk):
-        lex = re.sub(r'[^\w\s]', ' ', chunk.text).lower()
-        chunk.lex_terms = lex
-        chunk.token_est = len(self.encoder.encode(chunk.text))
-        
-        self.db.execute(
-            "INSERT OR IGNORE INTO chunks_fts(id, session_id, text, lex_terms) VALUES (?, ?, ?, ?)",
-            (chunk.id, chunk.session_id, chunk.text, chunk.lex_terms)
-        )
-        
-        vec_blob = np.array(chunk.embed_vec, dtype=np.float32).tobytes() if chunk.embed_vec else None
-        self.db.execute(
-            "INSERT OR IGNORE INTO chunks_meta(id, session_id, source, type, text, created_at, token_est, embed_vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (chunk.id, chunk.session_id, chunk.source, chunk.type, chunk.text, chunk.created_at, chunk.token_est, vec_blob)
-        )
+    def ingest_batch(self, chunks: List[Chunk]):
+        for c in chunks:
+            lex = RE_CLEAN.sub(' ', c.text).lower()
+            c.token_est = len(ENCODER.encode(c.text))
+            
+            self.db.execute(
+                "INSERT OR IGNORE INTO chunks_fts(id, session_id, text, lex_terms) VALUES (?, ?, ?, ?)",
+                (c.id, c.session_id, c.text, lex)
+            )
+            
+            vec_blob = np.array(c.embed_vec, dtype=np.float32).tobytes() if c.embed_vec else None
+            self.db.execute(
+                "INSERT OR IGNORE INTO chunks_meta(id, session_id, source, type, text, created_at, token_est, embed_vec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (c.id, c.session_id, c.source, c.type, c.text, c.created_at, c.token_est, vec_blob)
+            )
         self.db.commit()
-
-    def get_session_chunks(self, session_id: str, limit: int = 200) -> List[Chunk]:
-        cursor = self.db.execute(
-            "SELECT id, session_id, source, type, text, created_at, token_est, embed_vec FROM chunks_meta WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
-            (session_id, limit)
-        )
-        chunks = []
-        for row in cursor:
-            vec = np.frombuffer(row[7], dtype=np.float32).tolist() if row[7] else None
-            chunks.append(Chunk(
-                id=row[0], session_id=row[1], source=row[2], type=row[3],
-                text=row[4], created_at=row[5], token_est=row[6], embed_vec=vec
-            ))
-        return chunks
 
     def hybrid_search(self, session_id: str, query_text: str, query_vec: Optional[np.ndarray], top_k: int = 45) -> List[Chunk]:
         lex_ids = {}
         try:
-            q = re.sub(r'[^\w\s]', ' ', query_text).strip()
+            q = RE_CLEAN.sub(' ', query_text).strip()
             if q:
                 cursor = self.db.execute(
                     "SELECT id, bm25(chunks_fts) FROM chunks_fts WHERE session_id = ? AND chunks_fts MATCH ? LIMIT 80",
@@ -112,15 +104,26 @@ class SessionManager:
                     lex_ids[row[0]] = -row[1]
         except: pass
 
-        all_session_chunks = self.get_session_chunks(session_id, limit=600)
+        # Get recent chunks for this session
+        cursor = self.db.execute(
+            "SELECT id, session_id, source, type, text, created_at, token_est, embed_vec FROM chunks_meta WHERE session_id = ? ORDER BY created_at DESC LIMIT 500",
+            (session_id,)
+        )
+        
+        all_chunks = []
         semantic_scores = {}
-        if query_vec is not None:
-            q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9)
-            for c in all_session_chunks:
-                if c.embed_vec:
-                    c_vec = np.array(c.embed_vec)
-                    sim = np.dot(q_norm, c_vec / (np.linalg.norm(c_vec) + 1e-9))
-                    semantic_scores[c.id] = float(sim)
+        q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9) if query_vec is not None else None
+        
+        for row in cursor:
+            vec_blob = row[7]
+            c = Chunk(id=row[0], session_id=row[1], source=row[2], type=row[3], text=row[4], created_at=row[5], token_est=row[6])
+            
+            if q_norm is not None and vec_blob:
+                c_vec = np.frombuffer(vec_blob, dtype=np.float32)
+                sim = np.dot(q_norm, c_vec / (np.linalg.norm(c_vec) + 1e-9))
+                semantic_scores[c.id] = float(sim)
+            
+            all_chunks.append(c)
 
         def norm(d):
             if not d: return {}
@@ -132,64 +135,45 @@ class SessionManager:
         lex_norm = norm(lex_ids)
         sem_norm = norm(semantic_scores)
         
-        combined = []
         now = time.time()
-        for c in all_session_chunks:
-            # Hybrid Score
-            base_score = 0.3 * lex_norm.get(c.id, 0) + 0.7 * sem_norm.get(c.id, 0)
+        for c in all_chunks:
+            base = 0.3 * lex_norm.get(c.id, 0) + 0.7 * sem_norm.get(c.id, 0)
+            age_boost = 1.2 / (1.0 + (now - c.created_at) / 3600)
+            c.score = base * age_boost
             
-            # Recency Boost (up to 20% boost for very recent chunks)
-            age_hours = (now - c.created_at) / 3600
-            recency_boost = 1.2 / (1.0 + age_hours) 
-            
-            score = base_score * recency_boost
-            
-            if score > 0.03: # More lenient threshold
-                c.score = score
-                combined.append(c)
-        
-        return sorted(combined, key=lambda x: x.score, reverse=True)[:top_k]
+        return sorted([c for c in all_chunks if c.score > 0.02], key=lambda x: x.score, reverse=True)[:top_k]
 
-class SmartChunker:
-    """Fast, reliable structure-aware chunking."""
-    def __init__(self, target_tokens: int = 800): # Larger chunks for more context
-        self.target_tokens = target_tokens
-        self.encoder = tiktoken.get_encoding("cl100k_base")
-
-    def chunk_and_classify(self, text: str, source: str) -> List[Tuple[str, str]]:
-        if not text: return []
-        parts = re.split(r'(\n#{1,6}\s+.*|```[\s\S]*?```|\n\n)', text)
-        chunks = []
-        for p in parts:
-            p = p.strip()
-            if not p: continue
-            ctype = "exploratory"
-            if p.startswith("```") or p.startswith("#"): ctype = "authoritative"
-            elif "error" in p.lower() or "traceback" in p.lower(): ctype = "diagnostic"
-            elif source == "chat" or source == "user" or source == "assistant": ctype = "historical"
-            chunks.append((p, ctype))
-        return chunks
+    def terminate_session(self, session_id: str):
+        self.db.execute("DELETE FROM chunks_fts WHERE session_id = ?", (session_id,))
+        self.db.execute("DELETE FROM chunks_meta WHERE session_id = ?", (session_id,))
+        self.db.commit()
 
 class ContextOptimizer:
-    """Turbo-charged V1 Pipeline."""
-    def __init__(self,):
+    """Instant-start, Turbo-charged V1 Pipeline."""
+    def __init__(self):
         self.sessions = SessionManager()
-        self.chunker = SmartChunker()
         self.seen_messages = {} # session_id -> set of msg hashes
+        self.last_access = {} # session_id -> timestamp
+
+    def _cleanup(self):
+        now = time.time()
+        to_kill = [sid for sid, ts in self.last_access.items() if now - ts > 1800] # 30m
+        for sid in to_kill:
+            log.info(f"🌱 Germinating session {sid}")
+            self.sessions.terminate_session(sid)
+            self.seen_messages.pop(sid, None)
+            self.last_access.pop(sid, None)
 
     def ingest_event(self, session_id: str, content: Any, source: str):
         if not content: return
+        self.last_access[session_id] = time.time()
         
-        # Normalize content to string
         if isinstance(content, list):
             text = " ".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
         else:
             text = str(content)
         
-        # 🛡️ ANTI-INCEPTION: Never index reconstructed context or TOON blocks
-        if "RELEVANT SESSION CONTEXT" in text or "url: /context/session.toon" in text:
-            return
-            
+        if "RELEVANT SESSION CONTEXT" in text or "url: /context/session.toon" in text: return
         if not text.strip(): return
         
         msg_hash = hashlib.md5(text.encode()).hexdigest()
@@ -197,93 +181,90 @@ class ContextOptimizer:
         if msg_hash in self.seen_messages[session_id]: return
         self.seen_messages[session_id].add(msg_hash)
         
-        # 2. Chunk & Embed (with Cache)
-        raw_chunks = self.chunker.chunk_and_classify(text, source)
-        embedder = get_embedder()
+        raw_chunks = RE_BLOCKS.split(text)
+        to_ingest = []
+        to_embed = []
         
-        for content_part, ctype in raw_chunks:
-            # Skip chunks that look like metadata or headers
-            if content_part.startswith("---") or content_part.startswith("# Session Context"):
-                continue
-                
-            part_hash = hashlib.md5(content_part.encode()).hexdigest()
+        for p in raw_chunks:
+            p = p.strip()
+            if not p or p.startswith("---") or p.startswith("# Session Context"): continue
             
-            # Global Embedding Cache
-            if part_hash in _embedding_cache:
-                vec = _embedding_cache[part_hash]
-            elif embedder:
-                vec = list(embedder.embed([content_part]))[0][:128].tolist()
-                _embedding_cache[part_hash] = vec
-            else:
-                vec = None
+            ctype = "exploratory"
+            if p.startswith("```") or p.startswith("#"): ctype = "authoritative"
+            elif "error" in p.lower() or "traceback" in p.lower(): ctype = "diagnostic"
+            elif source in ("chat", "user", "assistant"): ctype = "historical"
             
-            chunk_id = f"{session_id}-{part_hash[:16]}-{ctype[:3]}"
-            self.sessions.ingest_chunk(Chunk(
-                id=chunk_id, session_id=session_id, source=source,
-                type=ctype, text=content_part, embed_vec=vec
-            ))
+            p_hash = hashlib.md5(p.encode()).hexdigest()
+            chunk = Chunk(id=f"{session_id}-{p_hash[:16]}-{ctype[:3]}", session_id=session_id, source=source, type=ctype, text=p)
+            
+            if p_hash in _embedding_cache:
+                chunk.embed_vec = _embedding_cache[p_hash]
+            elif _embedder_ready.is_set():
+                to_embed.append((p, p_hash, chunk))
+            
+            to_ingest.append(chunk)
+
+        # Batch Embedding
+        if to_embed:
+            texts = [x[0] for x in to_embed]
+            vecs = list(_embedder.embed(texts))
+            for i, (p, p_hash, chunk) in enumerate(to_embed):
+                v = vecs[i][:128].tolist()
+                chunk.embed_vec = v
+                _embedding_cache[p_hash] = v
+        
+        self.sessions.ingest_batch(to_ingest)
 
     def optimize(self, session_id: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         start_time = time.time()
+        self._cleanup()
         
-        # 1. Fast Retrieval Cache
         query_text = str(messages[-1].get("content", ""))
         query_hash = hashlib.md5(query_text.encode()).hexdigest()
         cache_key = (session_id, query_hash)
         
         if cache_key in _retrieval_cache:
             cached_msgs, ts = _retrieval_cache[cache_key]
-            if time.time() - ts < 30: # 30s cache
-                log.info(f"⚡️ Cache Hit [{session_id}] | 🔍 \"{query_text[:40]}...\"")
+            if time.time() - ts < 30:
+                log.info(f"⚡️ Cache Hit [{session_id}]")
                 return cached_msgs
 
-        # 2. Incremental Ingest (Only new messages)
+        # Ingest
         ingest_start = time.time()
         for m in messages:
             self.ingest_event(session_id, m.get("content", ""), m.get("role", "user"))
         ingest_time = (time.time() - ingest_start) * 1000
 
-        # 3. Hybrid Search
+        # Search
         search_start = time.time()
-        embedder = get_embedder()
-        query_vec = list(embedder.embed([query_text]))[0][:128] if embedder else None
+        query_vec = None
+        if _embedder_ready.is_set():
+            query_vec = list(_embedder.embed([query_text]))[0][:128]
+        
         relevant = self.sessions.hybrid_search(session_id, query_text, query_vec, top_k=45)
         search_time = (time.time() - search_start) * 1000
 
-        # 4. TOON Reconstruction
+        # Pack
         pack_start = time.time()
         toon_context = self._to_toon(relevant)
         
         optimized = []
         system = next((m for m in messages if m.get("role") == "system"), None)
         if system: optimized.append(system)
-        
         if toon_context:
-            optimized.append({
-                "role": "system", 
-                "content": f"--- SESSION CONTEXT (TOON) ---\n{toon_context}"
-            })
-        
+            optimized.append({"role": "system", "content": f"--- SESSION CONTEXT (TOON) ---\n{toon_context}"})
         optimized.append(messages[-1])
+        
         pack_time = (time.time() - pack_start) * 1000
         total_time = (time.time() - start_time) * 1000
 
-        # 5. Detailed Compact Logging
-        chunk_summary = ", ".join([f"{c.source}/{c.type[:3]}" for c in relevant[:5]])
-        if len(relevant) > 5: chunk_summary += "..."
-        
-        # Estimate tokens
-        total_tokens = sum(len(self.sessions.encoder.encode(json.dumps(m))) for m in optimized)
-        
-        log.info(f"✨ [{session_id}] | 🔍 \"{query_text[:30]}...\" | 📦 {len(relevant)} chunks ({chunk_summary}) | 🎟️ {total_tokens:,} tkn | ⚡️ {total_time:.0f}ms (I:{ingest_time:.0f} S:{search_time:.0f} P:{pack_time:.0f})")
+        log.info(f"✨ [{session_id}] | 📦 {len(relevant)} chunks | ⚡️ {total_time:.0f}ms (I:{ingest_time:.0f} S:{search_time:.0f} P:{pack_time:.0f})")
         
         _retrieval_cache[cache_key] = (optimized, time.time())
         return optimized
 
     def _to_toon(self, chunks: List[Chunk]) -> str:
         if not chunks: return ""
-        
-        # Group by type then source
         tree = {}
         for c in chunks:
             if c.type not in tree: tree[c.type] = {}
