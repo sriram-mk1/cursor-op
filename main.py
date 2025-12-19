@@ -242,7 +242,12 @@ async def chat(
             user_key_id = v1_key or "anon"
             log.info(f"🚀 [V3.3] Optimizing {session_id} for user {user_key_id[:8]}")
             optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, msgs)
-            log.info(f"✅ [V3.3] Optimized | {reconstruction_log.get('selected_lines')} / {reconstruction_log.get('total_lines')} lines kept")
+            
+            # V3.9: Correct the 'total' tokens to include the full cached history
+            if reconstruction_log and "total_history_tokens" in reconstruction_log:
+                original_tokens = reconstruction_log["total_history_tokens"]
+                
+            log.info(f"✅ [V3.9] Optimized | {reconstruction_log.get('selected_lines')} / {reconstruction_log.get('total_lines')} lines kept ({original_tokens} potential tokens)")
         except Exception as e:
             log.error(f"V1 Pipeline Error: {e}")
 

@@ -53,76 +53,78 @@ class Database:
         hashed = self._hash_key(api_key_raw)
         now = time.time()
         
-        # 1. Extract data from OpenRouter metadata or fallback to baseline
+        # 1. Extract data from OpenRouter metadata or fallback
         if or_metadata:
-            tokens_in = or_metadata.get("tokens_prompt", 0)
-            tokens_out = or_metadata.get("tokens_completion", 0)
-            total_cost_usd = or_metadata.get("total_cost", 0)
+            t_in = or_metadata.get("tokens_prompt", 0)
+            t_out = or_metadata.get("tokens_completion", 0)
+            t_cost = or_metadata.get("total_cost", 0)
+            t_saved = max(0, original_tokens - t_in)
             
-            # Calculate savings accurately
-            # tokens_saved is the delta in prompt tokens
-            tokens_saved = max(0, original_tokens - tokens_in)
-            
-            # To find cost saved, we need the price per input token.
-            # We can infer this from the total cost.
-            # cost = (tokens_in * input_price) + (tokens_out * output_price)
-            # A safe approximation for savings: (tokens_saved / tokens_in) * estimated_input_portion_of_cost
-            # Or even better, if we have the cost, we can see the 'unit' cost.
-            total_tokens = tokens_in + tokens_out
-            if total_tokens > 0:
-                avg_price_per_token = total_cost_usd / total_tokens
-                cost_saved_usd = tokens_saved * avg_price_per_token
-            else:
-                cost_saved_usd = 0
+            total_tokens = t_in + t_out
+            c_saved = (t_saved * (t_cost / total_tokens)) if total_tokens > 0 else 0
         else:
-            # Fallback for failed metadata fetch
-            tokens_in = original_tokens # Assume no optimization if we can't verify
-            tokens_out = 0
-            tokens_saved = 0
-            total_cost_usd = 0
-            cost_saved_usd = 0
+            t_in, t_out, t_saved, t_cost, c_saved = original_tokens, 0, 0, 0, 0
 
-        analytics_data = {
-            "id": str(uuid.uuid4()),
-            "hashed_key": hashed,
-            "session_id": session_id,
-            "model": model,
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-            "tokens_saved": tokens_saved,
-            "latency_ms": latency_ms,
-            "cost_saved_usd": cost_saved_usd,
-            "total_cost_usd": total_cost_usd,
-            "reconstruction_log": reconstruction_log or {},
-            "timestamp": now,
-            "or_id": or_metadata.get("id") if or_metadata else None
-        }
-        
         try:
-            self.supabase.table("analytics").insert(analytics_data).execute()
+            # 2. Check if a conversation row already exists for this session
+            existing = self.supabase.table("analytics").select("*").eq("session_id", session_id).execute()
             
-            # Update aggregate stats
+            if existing.data:
+                # Aggregate! (One Row per Conversation)
+                row = existing.data[0]
+                analytics_data = {
+                    "tokens_in": row["tokens_in"] + t_in,
+                    "tokens_out": row["tokens_out"] + t_out,
+                    "tokens_saved": row["tokens_saved"] + t_saved,
+                    "cost_saved_usd": float(row["cost_saved_usd"] or 0) + c_saved,
+                    "total_cost_usd": float(row["total_cost_usd"] or 0) + t_cost,
+                    "latency_ms": latency_ms, # Keep latest latency
+                    "reconstruction_log": reconstruction_log or row["reconstruction_log"],
+                    "timestamp": now,
+                    "or_id": or_metadata.get("id") if or_metadata else row["or_id"]
+                }
+                self.supabase.table("analytics").update(analytics_data).eq("session_id", session_id).execute()
+                res_id = row["id"]
+            else:
+                # Create NEW row for this conversation
+                res_id = str(uuid.uuid4())
+                analytics_data = {
+                    "id": res_id,
+                    "hashed_key": hashed,
+                    "session_id": session_id,
+                    "model": model,
+                    "tokens_in": t_in,
+                    "tokens_out": t_out,
+                    "tokens_saved": t_saved,
+                    "latency_ms": latency_ms,
+                    "cost_saved_usd": c_saved,
+                    "total_cost_usd": t_cost,
+                    "reconstruction_log": reconstruction_log or {},
+                    "timestamp": now,
+                    "or_id": or_metadata.get("id") if or_metadata else None
+                }
+                self.supabase.table("analytics").insert(analytics_data).execute()
+
+            # 3. Update global API Key aggregate stats
             key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
             if key_data.data:
-                new_saved = key_data.data["total_tokens_saved"] + tokens_saved
-                new_reqs = key_data.data["total_requests"] + 1
                 self.supabase.table("api_keys").update({
-                    "total_tokens_saved": new_saved,
-                    "total_requests": new_reqs
+                    "total_tokens_saved": key_data.data["total_tokens_saved"] + t_saved,
+                    "total_requests": key_data.data["total_requests"] + 1
                 }).eq("hashed_key", hashed).execute()
+
         except Exception as e:
-            logger.error(f"DB Insert/Update error: {e}")
+            logger.error(f"DB Upsert Error: {e}")
+            res_id = str(uuid.uuid4())
 
         return {
-            "id": analytics_data["id"],
+            "id": res_id,
             "session_id": session_id,
             "model": model,
-            "tokens_in": tokens_in,
-            "tokens_out": tokens_out,
-            "tokens_saved": tokens_saved,
+            "tokens_in": t_in,
+            "tokens_out": t_out,
+            "tokens_saved": t_saved,
             "latency_ms": latency_ms,
-            "cost_saved_usd": cost_saved_usd,
-            "total_cost_usd": total_cost_usd,
             "timestamp": now
         }
 

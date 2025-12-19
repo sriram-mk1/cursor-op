@@ -231,21 +231,26 @@ class ContextOptimizer:
         history = session["history"]
         atoms = session["atoms"]
         
-        # Phase 4: Boilerplate Noise Filters (The "Blackhole" Filter)
+        # V3.7 Ultra-Clean "Purge" Filter 
         NOISE_PATTERNS = [
-            r"<(task|environment_details|slug|name|model|tool_format|todos|update_todo_list)>",
-            r"</(task|environment_details|slug|name|model|tool_format|todos|update_todo_list)>",
-            r"# (VSCode Visible Files|VSCode Open Tabs|Current Time|Current Cost|Current Mode|Current Workspace Directory-)",
+            r"<(task|environment_details|slug|name|model|tool_format|todos|update_todo_list|ask_followup_question|attempt_completion|result|feedback)>",
+            r"</(task|environment_details|slug|name|model|tool_format|todos|update_todo_list|ask_followup_question|attempt_completion|result|feedback)>",
+            r"# (VSCode Visible Files|VSCode Open Tabs|Current Time|Current Cost|Current Mode|Current Workspace Directory-|Reminder: Instructions for Tool Use|Next Steps)",
             r"Current time in ISO 8601",
             r"User time zone:",
             r"No files found\.",
-            r"^\$?\d+\.\d{2}$", # Catches $0.00
+            r"^\$?\d+\.\d{2}$",
             r"You have not created a todo list yet",
             r"REMINDERS",
             r"\| # \| Content \| Status \|",
-            r"\[(ask_followup_question|update_todo_list)\] Result:"
+            r"\[(ask_followup_question|update_todo_list|attempt_completion)\] Result:",
+            r"\[ERROR\] You did not use a tool",
+            r"Tool uses are formatted using XML-style tags",
+            r"(Always use the actual tool name|If you have completed|If you require additional)",
+            r"\(This is an automated message, so do not respond to it conversationally\.\)"
         ]
         noise_re = [re.compile(p, re.IGNORECASE) for p in NOISE_PATTERNS]
+        xml_strip_re = re.compile(r'<[^>]+>') # Universal XML strip
 
         changed = False
         new_atoms = []
@@ -254,7 +259,16 @@ class ContextOptimizer:
             if not content or msg.get("role") == "system": continue
             
             raw_text = self.scorer._to_string(content)
-            m_hash = hashlib.md5(raw_text.encode()).hexdigest()
+            
+            # V3.7 surgical history cleaning: Strip XML from history too
+            clean_history_text = xml_strip_re.sub('', raw_text).strip()
+            # Also strip the noise patterns from the history strings
+            for r in noise_re:
+                clean_history_text = r.sub('', clean_history_text).strip()
+            
+            if not clean_history_text: continue
+
+            m_hash = hashlib.md5(clean_history_text.encode()).hexdigest()
             if any(m.get("hash") == m_hash for m in history):
                 continue
             
@@ -262,31 +276,34 @@ class ContextOptimizer:
             msg_ts = time.time()
             history.append({
                 "role": msg.get("role"),
-                "content": raw_text,
+                "content": clean_history_text, # Hyper-clean history
                 "hash": m_hash,
                 "timestamp": msg_ts
             })
             
-            lines = raw_text.split('\n')
+            lines = raw_text.split('\n') # Still use raw lines for atom splitting to find defs
             for line in lines:
                 clean_line = line.strip()
                 if not clean_line or len(clean_line) < 2: continue
                 
-                # Apply Phase 4 Noise Filter: Environmental garbage detection
+                # 1. Skip if it's purely a noise pattern
                 if any(r.search(clean_line) for r in noise_re): 
                     continue
                 
-                # We store the RAW line for the LLM to see, 
-                # but we can still use distillation internally for term extraction
+                # 2. Universal XML Stripping for stored atoms
+                # This kills all <tags> while keeping the content
+                stripped_content = xml_strip_re.sub('', clean_line).strip()
+                if not stripped_content: continue
+
                 new_atoms.append(Atom(
                     line_index=len(atoms) + len(new_atoms),
                     msg_index=msg_idx,
                     source=msg.get("role"),
-                    text=clean_line, # <--- PRESERVE ORIGINAL CONTEXT
-                    tokens=len(ENCODER.encode(clean_line)),
+                    text=stripped_content, # <--- ULTRA CLEAN PRESERVATION
+                    tokens=len(ENCODER.encode(stripped_content)),
                     timestamp=msg_ts,
-                    terms=self.scorer.get_terms(clean_line), # Terms are already distilled internally
-                    provides=self.scorer.extract_definitions(clean_line)
+                    terms=self.scorer.get_terms(stripped_content),
+                    provides=self.scorer.extract_definitions(clean_line) # Keep def detection on raw line
                 ))
             changed = True
         
@@ -305,36 +322,35 @@ class ContextOptimizer:
         query = self.scorer._to_string(messages[-1].get("content", ""))
         query_terms = self.scorer.get_terms(query)
         
+        # Phase 5: High-Fidelity Ceiling (Remove strict budgeting)
+        # We allow up to 30k tokens now for massive context awareness
+        max_tokens = 30000 
         specificity = len(query_terms)
-        if specificity <= 2:
-            max_tokens = 3000 
-        elif specificity >= 6:
-            max_tokens = 1200 
-        else:
-            max_tokens = self.base_budget
 
         scored_atoms = self.scorer.score_atoms(atoms, query)
         
-        # Higher density selection for the Top-K
-        top_atoms = sorted([a for a in scored_atoms if a.score > 0.1], key=lambda x: x.score, reverse=True)[:50]
+        # Density selection: Be more generous with what we include
+        top_atoms = sorted([a for a in scored_atoms if a.score > 0.05], key=lambda x: x.score, reverse=True)[:100]
         if not top_atoms:
-            return messages[-5:] if len(messages) > 5 else messages, {"status": "no_matches"}
+            return messages[-10:] if len(messages) > 10 else messages, {"status": "no_matches"}
 
         selected_indices: Set[int] = set()
-        def_map = {} # name -> line_index
+        def_map = {} 
         for a in atoms:
             for d in a.provides: def_map[d] = a.line_index
 
         for atom in top_atoms:
-            # Expand neighborhood for context flow
-            for offset in range(-1, 2):
+            # Expand neighborhood for "Deep Flow" context
+            # Grab 5 lines before and after for every hit to prevent fragmentation
+            for offset in range(-5, 6):
                 idx = atom.line_index + offset
                 if 0 <= idx < len(atoms): selected_indices.add(idx)
                     
-            # Structural Link
+            # Enhanced Structural Linking
             for d_name, d_idx in def_map.items():
                 if d_name in atom.text:
-                    for offset in range(-1, 4):
+                    # If we find a reference, grab the WHOLE block (15 lines)
+                    for offset in range(-2, 13):
                         idx = d_idx + offset
                         if 0 <= idx < len(atoms): selected_indices.add(idx)
         
@@ -348,7 +364,7 @@ class ContextOptimizer:
             header = ""
             if atom.msg_index != last_msg_idx:
                 prefix = "User" if atom.source == "user" else "AI"
-                header = f"\n### {prefix} (T-{int(time.time() - atom.timestamp)}s ago)\n"
+                header = f"\n### [{prefix} @ T-{int(time.time() - atom.timestamp)}s ago]\n"
                 last_msg_idx = atom.msg_index
             
             line_text = f"{header}  {atom.text}"
@@ -364,24 +380,32 @@ class ContextOptimizer:
         if sys_prompt: optimized.append(sys_prompt)
         
         if packed_lines:
-            # V3.3 Hyper-Clean Markdown Wrap
+            # V3.9 High-Fidelity Reconstruction
             context_text = (
-                "## CONTEXT OPTIMIZER (V3.3 ACTIVE)\n"
-                "The following fragments have been distilled for maximum relevance:\n"
+                "# CONTEXT OPTIMIZER (V3.9 HIGH-FIDELITY ACTIVE)\n"
+                "The following fragments have been intelligently retrieved and linked from the conversation history.\n"
+                "Structural linking has been applied to restore code integrity.\n"
+                "--- START RETRIEVED CONTEXT ---\n"
                 + "\n".join(packed_lines)
-                + "\n\n---\n*End of distilled context*"
+                + "\n--- END RETRIEVED CONTEXT ---\n"
             )
             optimized.append({"role": "system", "content": context_text})
             
         optimized.append(messages[-1])
         overhead = (time.time() - start_time) * 1000
         
+        # Phase 6: Accurate Savings Tracking
+        # Calculate what the total context size would have been WITHOUT optimization
+        total_history_tokens = sum(len(ENCODER.encode(str(m.get("content", "")))) for m in messages)
+        
         return optimized, {
-            "version": "3.3.0",
+            "version": "3.9.0",
             "specificity": specificity,
             "budget": max_tokens,
             "total_lines": len(atoms),
             "selected_lines": len(packed_lines),
+            "total_history_tokens": total_history_tokens,
+            "optimized_tokens": current_tokens,
             "overhead_ms": overhead,
             "sequence": [
                 {
@@ -390,6 +414,6 @@ class ContextOptimizer:
                     "score": round(a.score, 3),
                     "line_index": a.line_index
                 }
-                for a in final_atoms[:30]
+                for a in final_atoms[:50]
             ]
         }
