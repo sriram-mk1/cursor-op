@@ -3,8 +3,6 @@ uvicorn
 httpx
 pydantic
 python-dotenv
-fastembed
-simhash
 numpy
 tiktoken
 supabase
