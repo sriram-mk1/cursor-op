@@ -11,6 +11,18 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("database")
 
+# Pricing per 1M tokens (approximate standard rates)
+PRICING = {
+    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+    "gpt-4": {"input": 30.00, "output": 60.00},
+    "gpt-4o": {"input": 5.00, "output": 15.00},
+    "claude-3-opus": {"input": 15.00, "output": 75.00},
+    "claude-3-sonnet": {"input": 3.00, "output": 15.00},
+    "claude-3-haiku": {"input": 0.25, "output": 1.25},
+    # Default fallback
+    "default": {"input": 1.00, "output": 3.00}
+}
+
 # Try loading from multiple possible locations
 base_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(base_dir, ".env"))
@@ -50,19 +62,8 @@ class Database:
             return response.data[0]
         return None
 
-# Pricing per 1M tokens (approximate standard rates)
-PRICING = {
-    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
-    "gpt-4": {"input": 30.00, "output": 60.00},
-    "gpt-4o": {"input": 5.00, "output": 15.00},
-    "claude-3-opus": {"input": 15.00, "output": 75.00},
-    "claude-3-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-3-haiku": {"input": 0.25, "output": 1.25},
-    # Default fallback
-    "default": {"input": 1.00, "output": 3.00}
-}
 
-    def log_request(self, api_key_raw: str, session_id: str, model: str, tokens_in: int, tokens_out: int, tokens_saved: int, latency_ms: float):
+    def log_request(self, api_key_raw: str, session_id: str, model: str, tokens_in: int, tokens_out: int, tokens_saved: int, latency_ms: float, reconstruction_log: Dict = None):
         self._check_db()
         hashed = self._hash_key(api_key_raw)
         now = time.time()
@@ -96,6 +97,7 @@ PRICING = {
             "latency_ms": latency_ms,
             "cost_saved_usd": cost_saved_usd,
             "total_cost_usd": total_cost_usd,
+            "reconstruction_log": reconstruction_log or {},
             "timestamp": now
         }
         self.supabase.table("analytics").insert(analytics_data).execute()
