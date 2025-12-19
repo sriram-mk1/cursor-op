@@ -229,9 +229,11 @@ async def chat(
 
     if request.enable_optimization and len(msgs) > 1 and key_data:
         try:
-            log.info(f"🚀 Optimizing {session_id} | Original: {len(msgs)} msgs ({original_tokens} tokens)")
-            optimized_msgs, reconstruction_log = optimizer.optimize(session_id, msgs)
-            log.info(f"✅ Optimized {session_id} | Reduced to {len(optimized_msgs)} msgs")
+            # Use v1_key for strict isolation
+            user_key_id = v1_key or "anon"
+            log.info(f"🚀 [V3.3] Optimizing {session_id} for user {user_key_id[:8]}")
+            optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, msgs)
+            log.info(f"✅ [V3.3] Optimized | {reconstruction_log.get('selected_lines')} / {reconstruction_log.get('total_lines')} lines kept")
         except Exception as e:
             log.error(f"V1 Pipeline Error: {e}")
 
@@ -273,23 +275,21 @@ async def chat(
                     log.error(f"Error fetching OR metadata: {e}")
         return None
 
-    async def log_and_broadcast(gen_id: str, or_key: str, status_code: int):
+    async def log_and_broadcast(gen_id: str, or_key: str, status_code: int, latency_ms: float):
         if not key_data or not v1_key:
             log.warning("Skipping broadcast: No key data or V1 key")
             return
             
-        latency = (time.time() - start_time) * 1000
-        
         # Fetch accurate data from OpenRouter
         or_metadata = None
         if gen_id and status_code == 200:
             or_metadata = await fetch_or_metadata(gen_id, or_key)
 
         try:
-            log.info(f"Logging request for {v1_key[:8]}... Status: {status_code}")
+            log.info(f"Logging request for {v1_key[:8]}... Status: {status_code} Latency: {latency_ms:.1f}ms")
             log_entry = db.log_request(
                 v1_key, session_id, request.model, 
-                original_tokens, latency,
+                original_tokens, latency_ms,
                 reconstruction_log,
                 or_metadata=or_metadata
             )
@@ -320,7 +320,9 @@ async def chat(
                                         gen_id = chunk_data.get("id")
                                 except: pass
                             yield chunk
-                        background_tasks.add_task(log_and_broadcast, gen_id, or_key, 200)
+                        
+                        finish_latency = (time.time() - start_time) * 1000
+                        background_tasks.add_task(log_and_broadcast, gen_id, or_key, 200, finish_latency)
 
             return StreamingResponse(stream_gen(), media_type="text/event-stream")
         else:
@@ -329,11 +331,13 @@ async def chat(
                     resp = await client.post(f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers)
                     resp_json = resp.json()
                     gen_id = resp_json.get("id")
-                    background_tasks.add_task(log_and_broadcast, gen_id, or_key, resp.status_code)
+                    finish_latency = (time.time() - start_time) * 1000
+                    background_tasks.add_task(log_and_broadcast, gen_id, or_key, resp.status_code, finish_latency)
                     return JSONResponse(content=resp_json, status_code=resp.status_code)
                 except Exception as e:
                     log.error(f"Post Error: {e}")
-                    background_tasks.add_task(log_and_broadcast, None, or_key, 500)
+                    finish_latency = (time.time() - start_time) * 1000
+                    background_tasks.add_task(log_and_broadcast, None, or_key, 500, finish_latency)
                     raise e
     except Exception as e:
         log.error(f"Forward Error: {e}")
