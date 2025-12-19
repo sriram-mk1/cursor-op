@@ -7,6 +7,7 @@ import {
   ArrowUpRight, TrendingUp, Layers, ZapOff
 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
+import { createClient } from "@/utils/supabase";
 
 interface RequestLog {
   id: string;
@@ -31,14 +32,48 @@ export default function Dashboard() {
   const [connected, setConnected] = useState(false);
   const ws = useRef<WebSocket | null>(null);
 
-  // In a real app, this would come from the user's session or a selected key
-  const API_KEY = typeof window !== 'undefined' ? (localStorage.getItem("v1_key") || "v1-test-key") : "v1-test-key";
+  const [apiKey, setApiKey] = useState<string>("");
   const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000";
   const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
+  const supabase = createClient();
 
   useEffect(() => {
+    const init = async () => {
+      // 1. Try to get key from localStorage
+      let key = typeof window !== 'undefined' ? localStorage.getItem("v1_key") : null;
+
+      // 2. If no key, fetch from Supabase
+      if (!key || key === "v1-test-key") {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+          try {
+            const resp = await fetch(`${GATEWAY_URL}/api/keys`, {
+              headers: { "x-user-id": user.id }
+            });
+            if (resp.ok) {
+              const keys = await resp.json();
+              if (Array.isArray(keys) && keys.length > 0) {
+                // Use the most recently created key
+                key = keys[0].raw_key;
+                localStorage.setItem("v1_key", key!);
+              }
+            }
+          } catch (e) {
+            console.error("Failed to fetch keys:", e);
+          }
+        }
+      }
+
+      setApiKey(key || "v1-test-key");
+    };
+    init();
+  }, []);
+
+  useEffect(() => {
+    if (!apiKey) return;
+
     const connect = () => {
-      const socket = new WebSocket(`${WS_URL}/ws/${API_KEY}`);
+      const socket = new WebSocket(`${WS_URL}/ws/${apiKey}`);
       socket.onopen = () => setConnected(true);
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
@@ -63,7 +98,7 @@ export default function Dashboard() {
     };
     connect();
     return () => ws.current?.close();
-  }, []);
+  }, [apiKey]);
 
   return (
     <div className="layout-wrapper">
