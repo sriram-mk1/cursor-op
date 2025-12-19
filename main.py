@@ -42,21 +42,27 @@ class ConnectionManager:
         if api_key not in self.active_connections:
             self.active_connections[api_key] = set()
         self.active_connections[api_key].add(websocket)
+        log.info(f"WS Connected: {api_key[:8]}... Total: {len(self.active_connections[api_key])}")
 
     def disconnect(self, websocket: WebSocket, api_key: str):
         if api_key in self.active_connections:
             self.active_connections[api_key].remove(websocket)
+            log.info(f"WS Disconnected: {api_key[:8]}...")
 
     async def broadcast(self, api_key: str, message: dict):
         if api_key in self.active_connections:
+            log.info(f"Broadcasting to {len(self.active_connections[api_key])} clients for key {api_key[:8]}...")
             dead_connections = set()
             for connection in self.active_connections[api_key]:
                 try:
                     await connection.send_json(message)
-                except Exception:
+                except Exception as e:
+                    log.error(f"Broadcast Error: {e}")
                     dead_connections.add(connection)
             for dead in dead_connections:
                 self.active_connections[api_key].remove(dead)
+        else:
+            log.warning(f"No active WS connections for key {api_key[:8]}...")
 
 manager = ConnectionManager()
 
@@ -127,9 +133,11 @@ async def update_provider_key(req: UpdateProviderKeyRequest):
 
 @app.websocket("/ws/{api_key}")
 async def websocket_endpoint(websocket: WebSocket, api_key: str):
+    log.info(f"Incoming WS connection for key: {api_key[:8]}...")
     # Validate key
     key_data = db.validate_key(api_key)
     if not key_data:
+        log.warning(f"Invalid WS key attempt: {api_key}")
         await websocket.close(code=4003)
         return
     
@@ -137,10 +145,14 @@ async def websocket_endpoint(websocket: WebSocket, api_key: str):
     try:
         # Send initial stats
         stats = db.get_stats(api_key)
+        log.info(f"Sending initial stats to {api_key[:8]}...")
         await websocket.send_json({"type": "init", "data": stats})
         while True:
             await websocket.receive_text() # Keep alive
     except WebSocketDisconnect:
+        manager.disconnect(websocket, api_key)
+    except Exception as e:
+        log.error(f"WS Error: {e}")
         manager.disconnect(websocket, api_key)
 
 @app.post("/v1/chat/completions")
