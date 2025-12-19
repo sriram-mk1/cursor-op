@@ -50,10 +50,40 @@ class Database:
             return response.data[0]
         return None
 
+# Pricing per 1M tokens (approximate standard rates)
+PRICING = {
+    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+    "gpt-4": {"input": 30.00, "output": 60.00},
+    "gpt-4o": {"input": 5.00, "output": 15.00},
+    "claude-3-opus": {"input": 15.00, "output": 75.00},
+    "claude-3-sonnet": {"input": 3.00, "output": 15.00},
+    "claude-3-haiku": {"input": 0.25, "output": 1.25},
+    # Default fallback
+    "default": {"input": 1.00, "output": 3.00}
+}
+
     def log_request(self, api_key_raw: str, session_id: str, model: str, tokens_in: int, tokens_out: int, tokens_saved: int, latency_ms: float):
         self._check_db()
         hashed = self._hash_key(api_key_raw)
         now = time.time()
+        
+        # Calculate Costs
+        model_pricing = PRICING.get(model)
+        if not model_pricing:
+            # Try partial match or default
+            for k, v in PRICING.items():
+                if k in model:
+                    model_pricing = v
+                    break
+            if not model_pricing:
+                model_pricing = PRICING["default"]
+
+        input_cost = (tokens_in / 1_000_000) * model_pricing["input"]
+        output_cost = (tokens_out / 1_000_000) * model_pricing["output"]
+        total_cost_usd = input_cost + output_cost
+        
+        # Savings are based on input tokens saved
+        cost_saved_usd = (tokens_saved / 1_000_000) * model_pricing["input"]
         
         analytics_data = {
             "id": str(uuid.uuid4()),
@@ -64,6 +94,8 @@ class Database:
             "tokens_out": tokens_out,
             "tokens_saved": tokens_saved,
             "latency_ms": latency_ms,
+            "cost_saved_usd": cost_saved_usd,
+            "total_cost_usd": total_cost_usd,
             "timestamp": now
         }
         self.supabase.table("analytics").insert(analytics_data).execute()
@@ -85,6 +117,8 @@ class Database:
             "tokens_out": tokens_out,
             "tokens_saved": tokens_saved,
             "latency_ms": latency_ms,
+            "cost_saved_usd": cost_saved_usd,
+            "total_cost_usd": total_cost_usd,
             "timestamp": now
         }
 

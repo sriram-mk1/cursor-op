@@ -17,6 +17,8 @@ interface RequestLog {
   tokens_out: number;
   tokens_saved: number;
   latency_ms: number;
+  cost_saved_usd?: number;
+  total_cost_usd?: number;
   timestamp: number;
 }
 
@@ -30,6 +32,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [logs, setLogs] = useState<RequestLog[]>([]);
   const [connected, setConnected] = useState(false);
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const ws = useRef<WebSocket | null>(null);
 
   const [apiKey, setApiKey] = useState<string>("");
@@ -72,33 +75,71 @@ export default function Dashboard() {
   useEffect(() => {
     if (!apiKey) return;
 
+    let socket: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout;
+
     const connect = () => {
-      const socket = new WebSocket(`${WS_URL}/ws/${apiKey}`);
-      socket.onopen = () => setConnected(true);
+      if (socket?.readyState === WebSocket.OPEN) return;
+
+      console.log(`Connecting to WS with key: ${apiKey}`);
+      socket = new WebSocket(`${WS_URL}/ws/${apiKey}`);
+
+      socket.onopen = () => {
+        console.log("WS Connected");
+        setConnected(true);
+      };
+
       socket.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        if (message.type === "init") {
-          setStats(message.data);
-          setLogs(message.data.recent_requests || []);
-        } else if (message.type === "request") {
-          const newLog = message.data;
-          setLogs((prev) => [newLog, ...prev].slice(0, 50));
-          setStats((prev) => prev ? {
-            ...prev,
-            total_tokens_saved: prev.total_tokens_saved + newLog.tokens_saved,
-            total_requests: prev.total_requests + 1
-          } : null);
+        try {
+          const message = JSON.parse(event.data);
+          console.log("WS Message:", message.type);
+
+          if (message.type === "init") {
+            setStats(message.data);
+            setLogs(message.data.recent_requests || []);
+          } else if (message.type === "request") {
+            const newLog = message.data;
+            setLogs((prev) => {
+              const exists = prev.find(l => l.id === newLog.id);
+              if (exists) return prev;
+              return [newLog, ...prev].slice(0, 50);
+            });
+            setStats((prev) => prev ? {
+              ...prev,
+              total_tokens_saved: prev.total_tokens_saved + newLog.tokens_saved,
+              total_requests: prev.total_requests + 1
+            } : null);
+          }
+        } catch (e) {
+          console.error("WS Parse Error:", e);
         }
       };
-      socket.onclose = () => {
+
+      socket.onclose = (e) => {
+        console.log("WS Closed:", e.code, e.reason);
         setConnected(false);
-        setTimeout(connect, 3000);
+        // Only reconnect if not 4003 (invalid key)
+        if (e.code !== 4003) {
+          reconnectTimeout = setTimeout(connect, 3000);
+        }
       };
+
+      socket.onerror = (e) => {
+        console.error("WS Error:", e);
+      };
+
       ws.current = socket;
     };
+
     connect();
-    return () => ws.current?.close();
+
+    return () => {
+      clearTimeout(reconnectTimeout);
+      if (socket) socket.close();
+    };
   }, [apiKey]);
+
+  const totalCostSaved = logs.reduce((acc, log) => acc + (log.cost_saved_usd || 0), 0);
 
   return (
     <div className="layout-wrapper">
@@ -120,10 +161,10 @@ export default function Dashboard() {
         {/* Stats Grid */}
         <div className="stats-grid">
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="glass card stat-item">
-            <div className="stat-label"><Zap size={12} style={{ verticalAlign: "middle", marginRight: "6px" }} /> Tokens Saved</div>
-            <div className="stat-value text-accent">{(stats?.total_tokens_saved || 0).toLocaleString()}</div>
+            <div className="stat-label"><Zap size={12} style={{ verticalAlign: "middle", marginRight: "6px" }} /> Est. Cost Saved</div>
+            <div className="stat-value text-accent">${totalCostSaved.toFixed(4)}</div>
             <div style={{ fontSize: "11px", color: "rgba(0,255,136,0.5)", display: "flex", alignItems: "center", gap: "4px" }}>
-              <TrendingUp size={12} /> Real-time optimization
+              <TrendingUp size={12} /> Based on current usage
             </div>
           </motion.div>
 
@@ -167,11 +208,12 @@ export default function Dashboard() {
           </div>
 
           <div className="log-list">
-            <div className="log-item log-header">
+            <div className="log-item log-header" style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr" }}>
               <div>Session ID</div>
               <div>Model</div>
+              <div>Tokens</div>
               <div>Savings</div>
-              <div>Latency</div>
+              <div>Cost Saved</div>
               <div style={{ textAlign: "right" }}>Time</div>
             </div>
 
@@ -182,30 +224,66 @@ export default function Dashboard() {
                   initial={{ opacity: 0, height: 0 }}
                   animate={{ opacity: 1, height: "auto" }}
                   exit={{ opacity: 0 }}
-                  className="log-item"
+                  style={{ borderBottom: "1px solid var(--border)" }}
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                    <div style={{ width: "4px", height: "4px", background: "var(--accent)", borderRadius: "50%" }} />
-                    <span style={{ opacity: 0.9 }}>{log.session_id}</span>
-                  </div>
-                  <div className="text-muted" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                    <Cpu size={12} /> {log.model}
-                  </div>
-                  <div style={{ color: log.tokens_saved > 0 ? "var(--accent)" : "rgba(255,255,255,0.2)" }}>
-                    {log.tokens_saved > 0 ? (
-                      <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                        <Zap size={12} /> {log.tokens_saved.toLocaleString()}
+                  <div
+                    className="log-item"
+                    style={{
+                      gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr",
+                      cursor: "pointer",
+                      background: expandedLogId === log.id ? "rgba(255,255,255,0.02)" : "transparent"
+                    }}
+                    onClick={() => setExpandedLogId(expandedLogId === log.id ? null : log.id)}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", overflow: "hidden" }}>
+                      <div style={{ width: "4px", height: "4px", background: "var(--accent)", borderRadius: "50%", flexShrink: 0 }} />
+                      <span style={{ opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={log.session_id}>
+                        {log.session_id}
                       </span>
-                    ) : (
-                      <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                        <ZapOff size={12} /> 0
-                      </span>
-                    )}
+                    </div>
+                    <div className="text-muted" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                      <Cpu size={12} /> {log.model}
+                    </div>
+                    <div className="text-muted">
+                      {log.tokens_in + log.tokens_out}
+                    </div>
+                    <div style={{ color: log.tokens_saved > 0 ? "var(--accent)" : "rgba(255,255,255,0.2)" }}>
+                      {log.tokens_saved > 0 ? (
+                        <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <Zap size={12} /> {log.tokens_saved.toLocaleString()}
+                        </span>
+                      ) : "-"}
+                    </div>
+                    <div style={{ color: "var(--accent)" }}>
+                      ${(log.cost_saved_usd || 0).toFixed(5)}
+                    </div>
+                    <div style={{ textAlign: "right", opacity: 0.4 }}>
+                      {new Date(log.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                    </div>
                   </div>
-                  <div className="text-muted">{log.latency_ms.toFixed(0)}ms</div>
-                  <div style={{ textAlign: "right", opacity: 0.4 }}>
-                    {new Date(log.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                  </div>
+
+                  {expandedLogId === log.id && (
+                    <div style={{ padding: "16px 24px", background: "rgba(0,0,0,0.2)", fontSize: "13px" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "24px" }}>
+                        <div>
+                          <div className="text-muted" style={{ marginBottom: "4px" }}>Full Session ID</div>
+                          <div style={{ fontFamily: "monospace" }}>{log.session_id}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted" style={{ marginBottom: "4px" }}>Latency</div>
+                          <div>{log.latency_ms.toFixed(2)}ms</div>
+                        </div>
+                        <div>
+                          <div className="text-muted" style={{ marginBottom: "4px" }}>Total Cost</div>
+                          <div>${(log.total_cost_usd || 0).toFixed(6)}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted" style={{ marginBottom: "4px" }}>Tokens In / Out</div>
+                          <div>{log.tokens_in} / {log.tokens_out}</div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </motion.div>
               ))}
             </AnimatePresence>
