@@ -9,6 +9,18 @@ import {
 import { Sidebar } from "@/components/Sidebar";
 import { createClient } from "@/utils/supabase";
 
+interface ReconstructionLog {
+  total_lines: number;
+  selected_lines: number;
+  overhead_ms: number;
+  sequence: Array<{
+    source: string;
+    text: string;
+    score: number;
+    line_index: number;
+  }>;
+}
+
 interface RequestLog {
   id: string;
   session_id: string;
@@ -19,8 +31,12 @@ interface RequestLog {
   latency_ms: number;
   cost_saved_usd?: number;
   total_cost_usd?: number;
+  reconstruction_log?: ReconstructionLog;
   timestamp: number;
 }
+
+// ... (Stats interface and component setup remain same) ...
+
 
 interface Stats {
   total_tokens_saved: number;
@@ -263,25 +279,70 @@ export default function Dashboard() {
                   </div>
 
                   {expandedLogId === log.id && (
-                    <div style={{ padding: "16px 24px", background: "rgba(0,0,0,0.2)", fontSize: "13px" }}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "24px" }}>
+                    <div style={{ padding: "24px", background: "rgba(0,0,0,0.3)", fontSize: "13px", borderTop: "1px solid var(--border)" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: "24px", marginBottom: "32px" }}>
                         <div>
                           <div className="text-muted" style={{ marginBottom: "4px" }}>Full Session ID</div>
-                          <div style={{ fontFamily: "monospace" }}>{log.session_id}</div>
+                          <div style={{ fontFamily: "monospace", fontSize: "12px", color: "var(--fg)" }}>{log.session_id}</div>
                         </div>
                         <div>
-                          <div className="text-muted" style={{ marginBottom: "4px" }}>Latency</div>
-                          <div>{log.latency_ms.toFixed(2)}ms</div>
+                          <div className="text-muted" style={{ marginBottom: "4px" }}>Latency / Overhead</div>
+                          <div style={{ color: "var(--fg)" }}>
+                            {log.latency_ms.toFixed(0)}ms
+                            {log.reconstruction_log?.overhead_ms ? <span className="text-muted" style={{ marginLeft: "6px" }}>({log.reconstruction_log.overhead_ms.toFixed(1)}ms opt)</span> : null}
+                          </div>
                         </div>
                         <div>
                           <div className="text-muted" style={{ marginBottom: "4px" }}>Total Cost</div>
-                          <div>${(log.total_cost_usd || 0).toFixed(6)}</div>
+                          <div style={{ color: "var(--fg)" }}>${(log.total_cost_usd || 0).toFixed(6)}</div>
                         </div>
                         <div>
-                          <div className="text-muted" style={{ marginBottom: "4px" }}>Tokens In / Out</div>
-                          <div>{log.tokens_in} / {log.tokens_out}</div>
+                          <div className="text-muted" style={{ marginBottom: "4px" }}>Context Compression</div>
+                          <div style={{ color: "var(--fg)" }}>
+                            {log.reconstruction_log?.total_lines
+                              ? `${log.reconstruction_log.selected_lines} / ${log.reconstruction_log.total_lines} lines kept`
+                              : "N/A"}
+                          </div>
                         </div>
                       </div>
+
+                      {log.reconstruction_log?.sequence && log.reconstruction_log.sequence.length > 0 && (
+                        <div>
+                          <h3 style={{ fontSize: "12px", fontWeight: 600, marginBottom: "12px", color: "var(--muted)" }}>CONTEXT RECONSTRUCTION SEQUENCE</h3>
+                          <div style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "2px",
+                            background: "rgba(0,0,0,0.2)",
+                            padding: "1px",
+                            borderRadius: "6px",
+                            overflow: "hidden"
+                          }}>
+                            {log.reconstruction_log.sequence.map((item, idx) => (
+                              <div key={idx} style={{
+                                display: "flex",
+                                gap: "12px",
+                                padding: "8px 12px",
+                                background: item.source === "user" ? "rgba(255,255,255,0.03)" : "transparent",
+                                fontSize: "12px",
+                                fontFamily: "monospace",
+                                borderLeft: `2px solid ${item.score > 0.5 ? "var(--accent)" : "transparent"}`
+                              }}>
+                                <div style={{ width: "30px", opacity: 0.3 }}>#{item.line_index}</div>
+                                <div style={{ width: "40px", fontWeight: 600, color: item.source === "user" ? "var(--fg)" : "var(--muted)" }}>
+                                  {(item.source || "UNK").toUpperCase().slice(0, 3)}
+                                </div>
+                                <div style={{ flex: 1, opacity: 0.8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                  {item.text || ""}
+                                </div>
+                                <div style={{ width: "60px", textAlign: "right", color: item.score > 0 ? "var(--accent)" : "var(--muted)", opacity: item.score > 0 ? 1 : 0.3 }}>
+                                  {(item.score || 0).toFixed(2)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </motion.div>

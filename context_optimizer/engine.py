@@ -90,7 +90,7 @@ class ContextOptimizer:
                 "timestamp": time.time()
             })
 
-    def optimize(self, session_id: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def optimize(self, session_id: str, messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         start_time = time.time()
         
         # 1. Update session with new OG messages
@@ -176,4 +176,19 @@ class ContextOptimizer:
         overhead = (time.time() - start_time) * 1000
         log.info(f"⚡️ [V2 RAG] {session_id} | {len(packed_lines)} lines | {current_tokens} tokens | {overhead:.1f}ms")
         
-        return optimized
+        details = {
+            "total_lines": len(atoms),
+            "selected_lines": len(packed_lines),
+            "overhead_ms": overhead,
+            "sequence": [
+                {
+                    "source": a.source,
+                    "text": a.text[:50] + "..." if len(a.text) > 50 else a.text,
+                    "score": a.score,
+                    "line_index": a.line_index
+                }
+                for a in final_atoms
+            ]
+        }
+        
+        return optimized, details

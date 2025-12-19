@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from context_optimizer.engine import ContextOptimizer, ENCODER
 from database import Database
+from providers import ProviderHandler
 
 # Clean Logging
 class ToonLog(logging.Formatter):
@@ -164,22 +165,49 @@ async def chat(
     authorization: Optional[str] = Header(None, alias="authorization"),
     x_v1_key: Optional[str] = Header(None, alias="x-v1-key"),
     x_session_id: Optional[str] = Header(None, alias="x-session-id"),
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+    x_api_key: Optional[str] = Header(None, alias="x-api-key"),
 ):
-    # 1. Resolve OpenRouter Key (Primary)
-    # Priority: 
-    # 1. api_key in payload
-    # 2. Authorization header (if it's a real OR key, not a V1 key)
-    # 3. Environment variable OPENROUTER_API_KEY
-    or_key = request.api_key
-    
-    if not or_key and authorization and "v1-" not in authorization:
-        or_key = authorization.replace("Bearer ", "").strip()
-    
-    if not or_key or or_key.strip() == "":
-        or_key = os.getenv("OPENROUTER_API_KEY")
-    
-    if not or_key:
-        raise HTTPException(status_code=401, detail="Missing OpenRouter API Key. Please provide it in the Authorization header.")
+    # 1. Resolve Provider and Key
+    provider = "openrouter"
+    api_key = None
+
+    # Check specific headers first
+    if x_goog_api_key:
+        provider = "gemini"
+        api_key = x_goog_api_key
+    elif x_api_key:
+        provider = "anthropic"
+        api_key = x_api_key
+    elif request.api_key:
+        api_key = request.api_key
+        provider = ProviderHandler.determine_provider(api_key, request.model)
+    elif authorization:
+        auth_val = authorization.replace("Bearer ", "").strip()
+        if auth_val.startswith("GEMINI_API_KEY"):
+            provider = "gemini"
+            api_key = auth_val.replace("GEMINI_API_KEY", "").strip()
+        elif auth_val.startswith("ANTHROPIC_API_KEY"):
+            provider = "anthropic"
+            api_key = auth_val.replace("ANTHROPIC_API_KEY", "").strip()
+        elif "v1-" not in auth_val:
+            api_key = auth_val
+            provider = ProviderHandler.determine_provider(api_key, request.model)
+
+    # Fallback to Env Vars if no key provided
+    if not api_key:
+        if "gemini" in request.model.lower():
+            provider = "gemini"
+            api_key = os.getenv("GEMINI_API_KEY")
+        elif "claude" in request.model.lower():
+            provider = "anthropic"
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+        else:
+            provider = "openrouter"
+            api_key = os.getenv("OPENROUTER_API_KEY")
+
+    if not api_key:
+        raise HTTPException(status_code=401, detail=f"Missing API Key for provider {provider}")
 
     # 2. Resolve V1 Key for Tracking (Optional)
     v1_key = x_v1_key or (authorization.replace("Bearer ", "").strip() if authorization and "v1-" in authorization else None)
@@ -194,32 +222,21 @@ async def chat(
     
     original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in msgs)
     
-    # 4. V1 Pipeline: Optimize (Only if V1 key is valid for tracking)
-    start_time = time.time()
+    # 4. V1 Pipeline: Optimize Context (if enabled)
     optimized_msgs = msgs
+    reconstruction_log = {}
+
     if request.enable_optimization and len(msgs) > 1 and key_data:
         try:
-            optimized_msgs = optimizer.optimize(session_id, msgs)
+            optimized_msgs, reconstruction_log = optimizer.optimize(session_id, msgs)
         except Exception as e:
             log.error(f"V1 Pipeline Error: {e}")
 
     optimized_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in optimized_msgs)
     tokens_saved = max(0, original_tokens - optimized_tokens)
 
-    # 4. Forward to OpenRouter
-    payload = request.model_dump(exclude_none=True)
-    payload.pop("enable_optimization", None)
-    payload.pop("session_id", None)
-    payload.pop("api_key", None)
-    payload.pop("debug", None)
-    payload["messages"] = optimized_msgs
-    if "prompt" in payload: payload.pop("prompt")
-
-    headers = {"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"}
-
     async def log_and_broadcast(tokens_out: int, status_code: int):
         if not key_data or not v1_key:
-            log.warning("Skipping broadcast: No key data or V1 key")
             return
             
         latency = (time.time() - start_time) * 1000
@@ -227,40 +244,77 @@ async def chat(
             log.info(f"Logging request for {v1_key[:8]}... Status: {status_code}")
             log_entry = db.log_request(
                 v1_key, session_id, request.model, 
-                original_tokens, tokens_out, tokens_saved, latency
+                original_tokens, tokens_out, tokens_saved, latency,
+                reconstruction_log
             )
-            log.info(f"Broadcasting log entry to {v1_key[:8]}...")
             await manager.broadcast(v1_key, {"type": "request", "data": log_entry})
         except Exception as e:
             log.error(f"Logging Error: {e}")
 
+    # 5. Route to Provider
     try:
         if request.stream:
-            async def stream_gen():
+            async def stream_wrapper():
                 total_out = 0
+                generator = None
+                
+                if provider == "gemini":
+                    generator = ProviderHandler.stream_gemini(api_key, request.model, optimized_msgs)
+                elif provider == "anthropic":
+                    generator = ProviderHandler.stream_anthropic(api_key, request.model, optimized_msgs)
+                else:
+                    # OpenRouter / OpenAI
+                    payload = request.model_dump(exclude_none=True)
+                    payload["messages"] = optimized_msgs
+                    for k in ["enable_optimization", "session_id", "api_key", "prompt"]:
+                        payload.pop(k, None)
+                    
+                    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                    
+                    async def or_gen():
+                        async with httpx.AsyncClient(timeout=120.0) as client:
+                            async with client.stream("POST", f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers) as resp:
+                                async for chunk in resp.aiter_bytes():
+                                    yield chunk
+                    generator = or_gen()
+
                 try:
-                    async with httpx.AsyncClient(timeout=120.0) as client:
-                        async with client.stream("POST", f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers) as resp:
-                            async for chunk in resp.aiter_bytes():
-                                total_out += 1
-                                yield chunk
+                    async for chunk in generator:
+                        # Simple heuristic for token counting on stream
+                        total_out += 1 
+                        yield chunk
                     background_tasks.add_task(log_and_broadcast, total_out, 200)
                 except Exception as e:
                     log.error(f"Stream Error: {e}")
                     background_tasks.add_task(log_and_broadcast, 0, 500)
-            return StreamingResponse(stream_gen(), media_type="text/event-stream")
+
+            return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
         else:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                try:
+            # Non-streaming
+            resp_data = {}
+            status_code = 200
+            
+            if provider == "gemini":
+                resp_data = await ProviderHandler.send_gemini(api_key, request.model, optimized_msgs)
+            elif provider == "anthropic":
+                resp_data = await ProviderHandler.send_anthropic(api_key, request.model, optimized_msgs)
+            else:
+                # OpenRouter / OpenAI
+                payload = request.model_dump(exclude_none=True)
+                payload["messages"] = optimized_msgs
+                for k in ["enable_optimization", "session_id", "api_key", "prompt"]:
+                    payload.pop(k, None)
+                
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                async with httpx.AsyncClient(timeout=120.0) as client:
                     resp = await client.post(f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers)
-                    resp_json = resp.json()
-                    tokens_out = resp_json.get("usage", {}).get("completion_tokens", 0)
-                    background_tasks.add_task(log_and_broadcast, tokens_out, resp.status_code)
-                    return JSONResponse(content=resp_json, status_code=resp.status_code)
-                except Exception as e:
-                    log.error(f"Post Error: {e}")
-                    background_tasks.add_task(log_and_broadcast, 0, 500)
-                    raise e
+                    resp_data = resp.json()
+                    status_code = resp.status_code
+
+            tokens_out = resp_data.get("usage", {}).get("completion_tokens", 0)
+            background_tasks.add_task(log_and_broadcast, tokens_out, status_code)
+            return JSONResponse(content=resp_data, status_code=status_code)
+
     except Exception as e:
         log.error(f"Forward Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
