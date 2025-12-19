@@ -1,11 +1,9 @@
 import re
-import sqlite3
 import logging
 import hashlib
 import time
 import json
-import threading
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 import numpy as np
 import tiktoken
@@ -16,189 +14,166 @@ log = logging.getLogger("gateway")
 RE_CLEAN = re.compile(r'[^\w\s]')
 ENCODER = tiktoken.get_encoding("cl100k_base")
 
-# --- Global Model & Caches ---
-_embedder = None
-_embedder_ready = threading.Event()
-_embedding_cache = {}
-_retrieval_cache = {}
-
-def _load_model_bg():
-    global _embedder
-    try:
-        from fastembed import TextEmbedding
-        log.info("🔄 Loading Snowflake/snowflake-arctic-embed-xs...")
-        _embedder = TextEmbedding(model_name="Snowflake/snowflake-arctic-embed-xs")
-        _embedder_ready.set()
-        log.info("✅ Embedder ready")
-    except Exception as e:
-        log.error(f"❌ Embedder error: {e}")
-
-threading.Thread(target=_load_model_bg, daemon=True).start()
-
 @dataclass
-class Chunk:
-    id: str
-    session_id: str
+class Atom:
+    line_index: int
+    msg_index: int
     source: str
-    type: str
     text: str
-    created_at: float = field(default_factory=time.time)
+    tokens: int
     score: float = 0.0
 
-class SessionManager:
-    """Fast in-memory storage with vectorized search."""
+class AtomizedScorer:
+    """Ultra-fast vectorized lexical matcher."""
     def __init__(self):
-        self.db = sqlite3.connect(":memory:", check_same_thread=False)
-        self.db.execute("PRAGMA journal_mode=OFF")
-        self.db.execute("PRAGMA synchronous=OFF")
-        self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, session_id UNINDEXED, text, lex_terms)")
-        self.db.execute("""
-            CREATE TABLE IF NOT EXISTS chunks_meta (
-                id TEXT PRIMARY KEY,
-                session_id TEXT,
-                source TEXT,
-                type TEXT,
-                text TEXT,
-                created_at REAL,
-                embed_vec BLOB
-            )
-        """)
-        self.db.execute("CREATE INDEX IF NOT EXISTS idx_session ON chunks_meta(session_id)")
-        self.db.commit()
+        self.stop_words = {"the", "a", "an", "and", "or", "but", "if", "then", "else", "for", "while", "in", "is", "it", "of", "to"}
 
-    def ingest_batch(self, chunks: List[Dict[str, Any]]):
-        for c in chunks:
-            lex = RE_CLEAN.sub(' ', c['text']).lower()
-            self.db.execute("INSERT OR IGNORE INTO chunks_fts VALUES (?, ?, ?, ?)", (c['id'], c['session_id'], c['text'], lex))
-            vec_blob = np.array(c['embed_vec'], dtype=np.float32).tobytes() if c.get('embed_vec') else None
-            self.db.execute("INSERT OR IGNORE INTO chunks_meta VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                           (c['id'], c['session_id'], c['source'], c['type'], c['text'], c['created_at'], vec_blob))
-        self.db.commit()
+    def get_terms(self, text: str) -> Set[str]:
+        terms = set(RE_CLEAN.sub(' ', text).lower().split())
+        return terms - self.stop_words
 
-    def search(self, session_id: str, query_text: str, query_vec: Optional[np.ndarray], top_k: int = 45) -> List[Chunk]:
-        lex_scores = {}
-        try:
-            q = RE_CLEAN.sub(' ', query_text).strip()
-            if q:
-                cursor = self.db.execute("SELECT id, bm25(chunks_fts) FROM chunks_fts WHERE session_id = ? AND chunks_fts MATCH ? LIMIT 100", (session_id, q))
-                for row in cursor: lex_scores[row[0]] = -row[1]
-        except: pass
-
-        cursor = self.db.execute("SELECT id, embed_vec, created_at FROM chunks_meta WHERE session_id = ? ORDER BY created_at DESC LIMIT 500", (session_id,))
-        rows = cursor.fetchall()
-        if not rows: return []
+    def score_atoms(self, atoms: List[Atom], query: str) -> List[Atom]:
+        if not atoms or not query: return atoms
         
-        ids, vec_blobs, times = [r[0] for r in rows], [r[1] for r in rows], np.array([r[2] for r in rows])
-        sem_scores = {}
-        if query_vec is not None:
-            valid = [i for i, v in enumerate(vec_blobs) if v]
-            if valid:
-                matrix = np.frombuffer(b''.join([vec_blobs[i] for i in valid]), dtype=np.float32).reshape(len(valid), 128)
-                q_norm = query_vec / (np.linalg.norm(query_vec) + 1e-9)
-                sims = np.dot(matrix / (np.linalg.norm(matrix, axis=1, keepdims=True) + 1e-9), q_norm)
-                for i, idx in enumerate(valid): sem_scores[ids[idx]] = float(sims[i])
-
-        def norm(d):
-            if not d: return {}
-            vs = list(d.values())
-            mi, ma = min(vs), max(vs)
-            return {k: (v - mi) / (ma - mi + 1e-9) for k, v in d.items()}
-
-        l_n, s_n = norm(lex_scores), norm(sem_scores)
-        now = time.time()
-        results = []
-        for i, cid in enumerate(ids):
-            score = (0.3 * l_n.get(cid, 0) + 0.7 * s_n.get(cid, 0)) * (1.2 / (1.0 + (now - times[i]) / 3600))
-            if score > 0.01: results.append((cid, score))
+        query_terms = list(self.get_terms(query))
+        if not query_terms: return atoms
         
-        top = sorted(results, key=lambda x: x[1], reverse=True)[:top_k]
-        if not top: return []
-        
-        id_map = {cid: s for cid, s in top}
-        placeholders = ','.join(['?'] * len(top))
-        cursor = self.db.execute(f"SELECT id, session_id, source, type, text, created_at FROM chunks_meta WHERE id IN ({placeholders})", [x[0] for x in top])
-        
-        final = []
-        for r in cursor:
-            c = Chunk(id=r[0], session_id=r[1], source=r[2], type=r[3], text=r[4], created_at=r[5])
-            c.score = id_map.get(c.id, 0)
-            final.append(c)
-        return sorted(final, key=lambda x: x.score, reverse=True)
+        # Vectorized scoring: One pass over all atoms
+        # We use a simple but effective term-frequency / line-length heuristic
+        for atom in atoms:
+            atom_terms = self.get_terms(atom.text)
+            if not atom_terms: continue
+            
+            matches = sum(1 for t in query_terms if t in atom_terms)
+            if matches == 0: continue
+            
+            # Score = (matches / sqrt(query_len)) * (matches / sqrt(atom_len))
+            # This rewards density and exact matches
+            atom.score = (matches / (len(query_terms)**0.5)) * (matches / (len(atom_terms)**0.5 + 1))
+            
+            # Boost for code-like lines
+            if any(c in atom.text for c in ('{', '}', '(', ')', '=', ':', '`')):
+                atom.score *= 1.2
+                
+        return atoms
 
 class ContextOptimizer:
-    """Simplified, High-Performance RAG."""
+    """V2 Atomized Sequential RAG Engine."""
     def __init__(self):
-        self.sessions = SessionManager()
-        self.seen = {} # session_id -> set
-        self.last = {} # session_id -> ts
+        self.sessions: Dict[str, List[Dict[str, Any]]] = {}
+        self.scorer = AtomizedScorer()
+        self.max_context_tokens = 1800 # Aggressive token budget
 
-    def ingest(self, session_id: str, content: Any, role: str):
-        if not content or role == "system": return
-        text = " ".join(p.get("text", "") for p in content if isinstance(p, dict)) if isinstance(content, list) else str(content)
-        if not text.strip() or "RELEVANT SESSION CONTEXT" in text[:100]: return
-        
-        self.last[session_id] = time.time()
-        m_hash = hashlib.md5(text.encode()).hexdigest()
-        if session_id not in self.seen: self.seen[session_id] = set()
-        if m_hash in self.seen[session_id]: return
-        self.seen[session_id].add(m_hash)
-        
-        # Simple robust chunking
-        parts = [p.strip() for p in re.split(r'(\n\n|```[\s\S]*?```)', text) if p.strip()]
-        to_ingest = []
-        to_embed = []
-        
-        for p in parts:
-            p_hash = hashlib.md5(p.encode()).hexdigest()
-            ctype = "authoritative" if p[0] in ('`', '#') else "diagnostic" if "error" in p.lower() else "historical"
-            chunk = {"id": f"{session_id}-{p_hash[:16]}", "session_id": session_id, "source": role, "type": ctype, "text": p, "created_at": time.time()}
+    def ingest(self, session_id: str, messages: List[Dict[str, Any]]):
+        """Store only original messages, avoiding inception."""
+        if session_id not in self.sessions:
+            self.sessions[session_id] = []
             
-            if p_hash in _embedding_cache:
-                chunk["embed_vec"] = _embedding_cache[p_hash]
-            elif _embedder_ready.is_set():
-                to_embed.append((p, p_hash, chunk))
-            to_ingest.append(chunk)
-
-        if to_embed:
-            vecs = list(_embedder.embed([x[0] for x in to_embed]))
-            for i, (p, p_hash, chunk) in enumerate(to_embed):
-                v = vecs[i][:128].tolist()
-                chunk["embed_vec"] = v
-                _embedding_cache[p_hash] = v
-        
-        self.sessions.ingest_batch(to_ingest)
+        for msg in messages:
+            content = msg.get("content", "")
+            if not content or msg.get("role") == "system": continue
+            
+            # Anti-Inception: Skip if it looks like our own RAG context
+            text = str(content)
+            if "SESSION CONTEXT" in text[:100] or "# Session Summary" in text[:100]:
+                continue
+                
+            # Deduplicate by hash
+            m_hash = hashlib.md5(text.encode()).hexdigest()
+            if any(m.get("hash") == m_hash for m in self.sessions[session_id]):
+                continue
+                
+            self.sessions[session_id].append({
+                "role": msg.get("role"),
+                "content": text,
+                "hash": m_hash,
+                "timestamp": time.time()
+            })
 
     def optimize(self, session_id: str, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        start = time.time()
-        # Fast-path ingest
-        if session_id in self.last:
-            self.ingest(session_id, messages[-1].get("content"), messages[-1].get("role"))
-        else:
-            for m in messages: self.ingest(session_id, m.get("content"), m.get("role"))
+        start_time = time.time()
         
-        query = str(messages[-1].get("content", ""))
-        q_vec = list(_embedder.embed([query]))[0][:128] if _embedder_ready.is_set() else None
-        relevant = self.sessions.search(session_id, query, q_vec)
+        # 1. Update session with new OG messages
+        self.ingest(session_id, messages)
+        history = self.sessions.get(session_id, [])
+        if not history: return messages
         
-        # Build TOON
-        tree = {}
-        for c in relevant:
-            if c.type not in tree: tree[c.type] = {}
-            if c.source not in tree[c.type]: tree[c.type][c.source] = []
-            tree[c.type][c.source].append(c.text.replace('\n', ' '))
+        # 2. Atomize: Split everything into lines
+        atoms: List[Atom] = []
+        line_counter = 0
+        for i, msg in enumerate(history):
+            lines = msg["content"].split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                atoms.append(Atom(
+                    line_index=line_counter,
+                    msg_index=i,
+                    source=msg["role"],
+                    text=line,
+                    tokens=len(ENCODER.encode(line))
+                ))
+                line_counter += 1
+        
+        if not atoms: return messages
+        
+        # 3. Score: Vectorized lexical match
+        query = messages[-1].get("content", "")
+        scored_atoms = self.scorer.score_atoms(atoms, query)
+        
+        # 4. Cluster Expansion: Pick top atoms and pull in neighbors
+        top_atoms = sorted([a for a in scored_atoms if a.score > 0], key=lambda x: x.score, reverse=True)[:50]
+        if not top_atoms:
+            # Fallback: Just take the most recent messages if no matches
+            return messages[-5:] if len(messages) > 5 else messages
+
+        selected_indices: Set[int] = set()
+        for atom in top_atoms:
+            # Expand: Grab 2 lines before and 2 lines after for context
+            for offset in range(-2, 3):
+                idx = atom.line_index + offset
+                if 0 <= idx < len(atoms):
+                    selected_indices.add(idx)
+        
+        # 5. Chronological Reassembly
+        final_atoms = sorted([atoms[idx] for idx in selected_indices], key=lambda x: x.line_index)
+        
+        # 6. Telegraphic Packing (within token budget)
+        packed_lines = []
+        current_tokens = 0
+        last_msg_idx = -1
+        
+        for atom in final_atoms:
+            # Add source header if message changed
+            header = ""
+            if atom.msg_index != last_msg_idx:
+                header = f"\n[{atom.source.upper()}]:\n"
+                last_msg_idx = atom.msg_index
             
-        toon = ["# Session Summary"]
-        for t, srcs in tree.items():
-            toon.append(f"{t}:")
-            for s, txts in srcs.items():
-                toon.append(f"  {s}:")
-                for txt in txts: toon.append(f"    - \"{txt}\"")
-        
+            line_text = f"{header}  {atom.text}"
+            line_tokens = len(ENCODER.encode(line_text))
+            
+            if current_tokens + line_tokens > self.max_context_tokens:
+                break
+                
+            packed_lines.append(line_text)
+            current_tokens += line_tokens
+            
+        # 7. Rebuild Message List
         optimized = []
-        sys = next((m for m in messages if m.get("role") == "system"), None)
-        if sys: optimized.append(sys)
-        if relevant: optimized.append({"role": "system", "content": f"--- SESSION CONTEXT ---\n" + "\n".join(toon)})
+        # Keep original system prompt if exists
+        sys_prompt = next((m for m in messages if m.get("role") == "system"), None)
+        if sys_prompt: optimized.append(sys_prompt)
+        
+        # Add the "Swiss Cheese" context
+        if packed_lines:
+            context_text = "--- RELEVANT SESSION HISTORY (ATOMIZED) ---\n" + "\n".join(packed_lines)
+            optimized.append({"role": "system", "content": context_text})
+            
+        # Always add the last user message
         optimized.append(messages[-1])
         
-        log.info(f"⚡️ [{session_id}] | {len(relevant)} chunks | {int((time.time()-start)*1000)}ms")
+        overhead = (time.time() - start_time) * 1000
+        log.info(f"⚡️ [V2 RAG] {session_id} | {len(packed_lines)} lines | {current_tokens} tokens | {overhead:.1f}ms")
+        
         return optimized
