@@ -27,8 +27,16 @@ class AtomizedScorer:
     def __init__(self):
         self.stop_words = {"the", "a", "an", "and", "or", "but", "if", "then", "else", "for", "while", "in", "is", "it", "of", "to"}
 
-    def get_terms(self, text: str) -> Set[str]:
-        terms = set(RE_CLEAN.sub(' ', text).lower().split())
+    def _to_string(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content)
+        return str(content)
+
+    def get_terms(self, text: Any) -> Set[str]:
+        text_str = self._to_string(text)
+        terms = set(RE_CLEAN.sub(' ', text_str).lower().split())
         return terms - self.stop_words
 
     def score_atoms(self, atoms: List[Atom], query: str) -> List[Atom]:
@@ -73,7 +81,7 @@ class ContextOptimizer:
             if not content or msg.get("role") == "system": continue
             
             # Anti-Inception: Skip if it looks like our own RAG context
-            text = str(content)
+            text = self.scorer._to_string(content)
             if "SESSION CONTEXT" in text[:100] or "# Session Summary" in text[:100]:
                 continue
                 

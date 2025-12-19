@@ -165,6 +165,7 @@ async def chat(
     x_v1_key: Optional[str] = Header(None, alias="x-v1-key"),
     x_session_id: Optional[str] = Header(None, alias="x-session-id"),
 ):
+    start_time = time.time()
     # 1. Resolve OpenRouter Key (Primary)
     # Priority: 
     # 1. api_key in payload
