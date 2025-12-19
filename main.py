@@ -219,14 +219,17 @@ async def chat(
 
     async def log_and_broadcast(tokens_out: int, status_code: int):
         if not key_data or not v1_key:
+            log.warning("Skipping broadcast: No key data or V1 key")
             return
             
         latency = (time.time() - start_time) * 1000
         try:
+            log.info(f"Logging request for {v1_key[:8]}... Status: {status_code}")
             log_entry = db.log_request(
                 v1_key, session_id, request.model, 
                 original_tokens, tokens_out, tokens_saved, latency
             )
+            log.info(f"Broadcasting log entry to {v1_key[:8]}...")
             await manager.broadcast(v1_key, {"type": "request", "data": log_entry})
         except Exception as e:
             log.error(f"Logging Error: {e}")
