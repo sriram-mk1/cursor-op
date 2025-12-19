@@ -142,18 +142,26 @@ class ContextOptimizer:
         self.base_budget = 1800
         self.session_ttl = 86400 # 24 Hours
         
-        # Redis Setup: Smart detection for Railway/Render
+        # Redis Setup: Smart detection with strict timeouts
         redis_url = os.getenv("REDIS_URL") or os.getenv("REDISURL") or os.getenv("REDISHOST")
         if redis_url and not redis_url.startswith("redis"):
-            # If Railway only provides HOST, wrap it
             redis_url = f"redis://{redis_url}"
             
         if redis_url:
             try:
-                self.redis = redis.from_url(redis_url, decode_responses=True)
+                # Add strict timeouts to prevent hanging on cold starts or network issues
+                self.redis = redis.from_url(
+                    redis_url, 
+                    decode_responses=True,
+                    socket_timeout=3.0,
+                    socket_connect_timeout=3.0,
+                    retry_on_timeout=False
+                )
+                # Verify connection immediately
+                self.redis.ping()
                 log.info(f"📡 [V3 RAG] Connected to Redis KV Cache")
             except Exception as e:
-                log.error(f"❌ Redis connection failed: {e}")
+                log.error(f"❌ Redis connection failed (falling back to RAM): {e}")
                 self.redis = None
         else:
             self.redis = None

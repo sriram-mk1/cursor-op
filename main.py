@@ -301,23 +301,27 @@ async def chat(
     try:
         if request.stream:
             async def stream_gen():
-                total_out = 0
-                try:
-                    async with httpx.AsyncClient(timeout=120.0) as client:
-                        async with client.stream("POST", f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers) as resp:
-                            gen_id = None
-                            async for chunk in resp.aiter_bytes():
-                                if not gen_id and chunk.startswith(b"data: "):
-                                    try:
-                                        # Attempt to extract ID from first chunk
-                                        chunk_data = json.loads(chunk[6:])
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    async with client.stream("POST", f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers) as resp:
+                        if resp.status_code != 200:
+                            # Forward high-level error if OR fails early
+                            error_text = await resp.aread()
+                            log.error(f"Upstream Stream Error {resp.status_code}: {error_text}")
+                            yield f"data: {json.dumps({'error': {'message': f'OpenRouter Error {resp.status_code}', 'type': 'upstream_error'}})}\n\n".encode()
+                            return
+
+                        gen_id = None
+                        async for chunk in resp.aiter_bytes():
+                            if not gen_id and chunk.startswith(b"data: "):
+                                try:
+                                    content = chunk.decode('utf-8').replace('data: ', '').strip()
+                                    if content != '[DONE]':
+                                        chunk_data = json.loads(content)
                                         gen_id = chunk_data.get("id")
-                                    except: pass
-                                yield chunk
-                    background_tasks.add_task(log_and_broadcast, gen_id, or_key, 200)
-                except Exception as e:
-                    log.error(f"Stream Error: {e}")
-                    background_tasks.add_task(log_and_broadcast, None, or_key, 500)
+                                except: pass
+                            yield chunk
+                        background_tasks.add_task(log_and_broadcast, gen_id, or_key, 200)
+
             return StreamingResponse(stream_gen(), media_type="text/event-stream")
         else:
             async with httpx.AsyncClient(timeout=120.0) as client:
