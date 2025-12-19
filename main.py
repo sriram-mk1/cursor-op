@@ -208,11 +208,19 @@ async def chat(
     if not session_id and msgs:
         # Create a stable fingerprint from the first message AND the user's key
         key_id = v1_key[:8] if v1_key else "anon"
-        first_msg = json.dumps(msgs[0], sort_keys=True)
-        # Salt the hash with the user's key ID
-        fingerprint = hashlib.md5(f"{key_id}:{first_msg}".encode()).hexdigest()[:12]
+        
+        # V3.6 Denoised Fingerprinting: 
+        # We strip the environment garbage BEFORE hashing so the session is "sticky"
+        # regardless of timestamp/cost drift in the boilerplate.
+        first_content = str(msgs[0].get("content", ""))
+        # Simple extraction of the actual task/user input
+        task_match = re.search(r"<task>(.*?)</task>", first_content, re.DOTALL | re.IGNORECASE)
+        core_msg = task_match.group(1).strip() if task_match else first_content[:500]
+        
+        # Salt with the user's key for 100% isolation
+        fingerprint = hashlib.md5(f"{key_id}:{core_msg}".encode()).hexdigest()[:12]
         session_id = f"t_{key_id}_{fingerprint}"
-        log.info(f"🧩 Fingerprinted thread: {session_id} (Isolated for user)")
+        log.info(f"🧩 Stable Fingerprint: {session_id} (Denoised)")
     elif session_id:
         log.info(f"📌 Using provided session: {session_id}")
     
