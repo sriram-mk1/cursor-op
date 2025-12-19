@@ -6,7 +6,7 @@ import random
 async def send_test_request(session_id: str):
     url = "http://localhost:8000/v1/chat/completions"
     headers = {
-        "x-v1-key": "v1-test-key",
+        "x-v1-key": "v1-ae887ef2485a47e9a2425da7fbca33852ad50c1149814",
         "Content-Type": "application/json"
     }
     

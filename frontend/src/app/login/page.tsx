@@ -16,7 +16,9 @@ export default function LoginPage() {
         const { error } = await supabase.auth.signInWithOtp({
             email,
             options: {
-                emailRedirectTo: `${window.location.origin}/auth/callback`,
+                emailRedirectTo: window.location.origin.includes("localhost")
+                    ? `${window.location.origin}/auth/callback`
+                    : "https://cursor-op.vercel.app/auth/callback",
             },
         });
         if (error) alert(error.message);
