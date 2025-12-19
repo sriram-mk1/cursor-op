@@ -7,8 +7,9 @@ import { motion } from "framer-motion";
 
 export default function AnalyticsPage() {
     const [stats, setStats] = useState<any>(null);
+    const [view, setView] = useState("daily");
     const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000";
-    const API_KEY = typeof window !== 'undefined' ? (localStorage.getItem("v1_key") || "v1-test-key") : "v1-test-key";
+    const API_KEY = typeof window !== 'undefined' ? (localStorage.getItem("v1_key") || "") : "";
 
     useEffect(() => {
         const fetchStats = async () => {
@@ -19,93 +20,143 @@ export default function AnalyticsPage() {
                 const data = await resp.json();
                 if (data && typeof data === 'object' && !data.detail) {
                     setStats(data);
-                } else {
-                    console.error("Invalid stats data:", data);
-                    setStats(null);
                 }
             } catch (e) {
                 console.error("Failed to fetch stats", e);
-                setStats(null);
             }
         };
         fetchStats();
     }, [GATEWAY_URL, API_KEY]);
+
+    const recentLogs = stats?.recent_requests || [];
+    const totalSaved = recentLogs.reduce((acc: number, r: any) => acc + (r.cost_saved_usd || 0), 0);
+    const avgLatency = recentLogs.length > 0 ? recentLogs.reduce((acc: number, r: any) => acc + r.latency_ms, 0) / recentLogs.length : 0;
+    const avgOptimization = recentLogs.length > 0 ? (recentLogs.reduce((acc: number, r: any) => acc + r.tokens_saved, 0) / recentLogs.reduce((acc: number, r: any) => acc + (r.tokens_in + r.tokens_saved), 0)) * 100 : 0;
 
     return (
         <div className="layout-wrapper">
             <Sidebar />
 
             <main className="main-content">
-                <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: "48px" }}>
+                <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "48px" }}>
                     <div>
-                        <h1 style={{ fontSize: "24px", marginBottom: "4px" }}>Analytics</h1>
-                        <p className="text-muted" style={{ fontSize: "14px" }}>Deep insights into your context optimization and cost savings.</p>
+                        <h1 style={{ fontSize: "24px", fontWeight: 600 }}>Performance Analytics</h1>
+                        <p className="text-muted" style={{ fontSize: "13px", marginTop: "4px" }}>Visualizing the impact of V1 Context Optimization.</p>
                     </div>
-                    <div style={{ display: "flex", gap: "12px" }}>
-                        <select className="input" style={{ fontSize: "12px", padding: "6px 12px" }}>
-                            <option>Last 24 Hours</option>
-                            <option>Last 7 Days</option>
-                            <option>Last 30 Days</option>
-                        </select>
+                    <div className="glass" style={{ padding: "4px", borderRadius: "8px", display: "flex", gap: "4px" }}>
+                        {["daily", "weekly", "monthly"].map(v => (
+                            <button
+                                key={v}
+                                onClick={() => setView(v)}
+                                className="btn"
+                                style={{
+                                    background: view === v ? "var(--fg)" : "transparent",
+                                    color: view === v ? "var(--bg)" : "var(--fg)",
+                                    fontSize: "10px",
+                                    padding: "6px 12px",
+                                    textTransform: "uppercase"
+                                }}
+                            >
+                                {v}
+                            </button>
+                        ))}
                     </div>
                 </header>
 
-                <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "24px", marginBottom: "24px" }}>
-                    <div className="glass card" style={{ height: "400px", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center" }}>
-                        <Activity size={48} className="text-accent" style={{ opacity: 0.2, marginBottom: "16px" }} />
-                        <p className="text-muted" style={{ fontSize: "14px" }}>
-                            {stats?.recent_requests?.length > 0 ? "Analyzing request patterns..." : "No data available for the selected period."}
-                        </p>
+                <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: "32px", marginBottom: "32px" }}>
+                    {/* Main Chart Card */}
+                    <div className="glass card" style={{ position: "relative" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "32px" }}>
+                            <div>
+                                <h3 style={{ fontSize: "14px", fontWeight: 600, color: "var(--muted)" }}>SAVINGS TREND</h3>
+                                <div style={{ fontSize: "24px", fontWeight: 500, marginTop: "4px" }}>${totalSaved.toFixed(4)}</div>
+                            </div>
+                            <div className="savings-badge">
+                                <TrendingUp size={12} /> +{avgOptimization.toFixed(1)}% Efficiency
+                            </div>
+                        </div>
+
+                        <div className="bar-chart-container">
+                            {recentLogs.length > 0 ? [...recentLogs].reverse().map((r: any, i: number) => {
+                                const height = (r.cost_saved_usd / (Math.max(...recentLogs.map((l: any) => l.cost_saved_usd)) || 1)) * 100;
+                                return (
+                                    <motion.div
+                                        key={r.id}
+                                        initial={{ height: 0 }}
+                                        animate={{ height: `${Math.max(10, height)}%` }}
+                                        className="bar-column"
+                                        data-value={`$${(r.cost_saved_usd || 0).toFixed(4)}`}
+                                    />
+                                );
+                            }) : (
+                                <div className="text-muted" style={{ width: "100%", textAlign: "center", fontSize: "12px" }}>Awaiting request data...</div>
+                            )}
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", marginTop: "12px", fontSize: "10px", opacity: 0.3 }}>
+                            <span>50 REQUESTS AGO</span>
+                            <span>NOW</span>
+                        </div>
                     </div>
 
-                    <div style={{ display: "grid", gap: "24px" }}>
-                        <div className="glass card">
-                            <div className="stat-label">Total Tokens Saved</div>
-                            <div className="stat-value text-accent" style={{ fontSize: "24px", marginTop: "8px" }}>
-                                {stats?.total_tokens_saved?.toLocaleString() || "0"}
-                            </div>
-                            <div style={{ fontSize: "11px", opacity: 0.4, marginTop: "4px" }}>Lifetime savings</div>
+                    {/* Secondary Stats */}
+                    <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                        <div className="glass card stat-item" style={{ background: "var(--accent-muted)", borderColor: "var(--accent)" }}>
+                            <div className="stat-label" style={{ color: "var(--accent)" }}>Net Savings (Est)</div>
+                            <div className="stat-value" style={{ color: "var(--accent)" }}>${(totalSaved * 0.95).toFixed(4)}</div>
+                            <div style={{ fontSize: "11px", opacity: 0.6 }}>After gateway overhead</div>
                         </div>
-                        <div className="glass card">
-                            <div className="stat-label">Total Requests</div>
-                            <div className="stat-value" style={{ fontSize: "24px", marginTop: "8px" }}>
-                                {stats?.total_requests?.toLocaleString() || "0"}
-                            </div>
-                            <div style={{ fontSize: "11px", opacity: 0.4, marginTop: "4px" }}>Processed by V1</div>
+                        <div className="glass card stat-item">
+                            <div className="stat-label">Avg. Optimization</div>
+                            <div className="stat-value">{avgOptimization.toFixed(1)}% <span style={{ fontSize: "14px", opacity: 0.4 }}>Tokens Distilled</span></div>
                         </div>
-                        <div className="glass card">
-                            <div className="stat-label">Active Sessions</div>
-                            <div className="stat-value" style={{ fontSize: "24px", marginTop: "8px" }}>
-                                {new Set(stats?.recent_requests?.map((r: any) => r.session_id)).size || "0"}
-                            </div>
-                            <div style={{ fontSize: "11px", opacity: 0.4, marginTop: "4px" }}>In the last 50 requests</div>
+                        <div className="glass card stat-item">
+                            <div className="stat-label">Avg. Latency</div>
+                            <div className="stat-value">{avgLatency.toFixed(0)} <span style={{ fontSize: "14px", opacity: 0.4 }}>ms</span></div>
                         </div>
                     </div>
                 </div>
 
-                <div className="glass card">
-                    <h3 style={{ fontSize: "16px", marginBottom: "20px" }}>Efficiency Breakdown</h3>
-                    <div style={{ display: "grid", gap: "16px" }}>
-                        {stats?.recent_requests?.length > 0 ? (
-                            stats.recent_requests.slice(0, 5).map((req: any, i: number) => (
-                                <div key={req.id} style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-                                    <div style={{ flex: 1 }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", marginBottom: "6px" }}>
-                                            <span>Session: {req.session_id}</span>
-                                            <span className="text-accent">{((req.tokens_saved / (req.tokens_in + 1)) * 100).toFixed(1)}% saved</span>
-                                        </div>
-                                        <div style={{ height: "4px", background: "var(--border)", borderRadius: "2px", overflow: "hidden" }}>
-                                            <div style={{ width: `${Math.min(100, (req.tokens_saved / (req.tokens_in + 1)) * 100)}%`, height: "100%", background: "var(--accent)" }} />
-                                        </div>
+                {/* Efficiency Breakdown */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "32px" }}>
+                    <div className="glass card">
+                        <h3 style={{ fontSize: "14px", fontWeight: 600, marginBottom: "24px" }}>Context Efficiency</h3>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                            {recentLogs.slice(0, 6).map((req: any) => (
+                                <div key={req.id}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "8px" }}>
+                                        <span style={{ opacity: 0.5 }}>{req.session_id.slice(0, 16)}...</span>
+                                        <span className="text-accent">{(req.tokens_saved / (req.tokens_in + req.tokens_saved || 1) * 100).toFixed(0)}% Saved</span>
                                     </div>
-                                    <div className="text-muted" style={{ fontSize: "12px", width: "80px", textAlign: "right" }}>{req.tokens_in} tkn</div>
+                                    <div style={{ height: "6px", background: "rgba(255,255,255,0.05)", borderRadius: "3px", overflow: "hidden" }}>
+                                        <motion.div
+                                            initial={{ width: 0 }}
+                                            animate={{ width: `${(req.tokens_saved / (req.tokens_in + req.tokens_saved || 1)) * 100}%` }}
+                                            style={{ height: "100%", background: "var(--accent)" }}
+                                        />
+                                    </div>
                                 </div>
-                            ))
-                        ) : (
-                            <p className="text-muted" style={{ fontSize: "13px", textAlign: "center", padding: "20px" }}>
-                                Start sending requests to see efficiency metrics.
-                            </p>
-                        )}
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="glass card">
+                        <h3 style={{ fontSize: "14px", fontWeight: 600, marginBottom: "24px" }}>Model Distribution</h3>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                            {Array.from(new Set(recentLogs.map((r: any) => r.model))).map((model: any) => {
+                                const count = recentLogs.filter((r: any) => r.model === model).length;
+                                const percentage = (count / recentLogs.length) * 100;
+                                return (
+                                    <div key={model} className="glass" style={{ padding: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                                            <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "var(--accent)" }} />
+                                            <span style={{ fontSize: "12px" }}>{model}</span>
+                                        </div>
+                                        <div style={{ fontSize: "12px", fontWeight: 600 }}>{percentage.toFixed(0)}%</div>
+                                    </div>
+                                );
+                            })}
+                            {recentLogs.length === 0 && <div className="text-muted" style={{ fontSize: "12px", textAlign: "center", padding: "40px" }}>No model data yet</div>}
+                        </div>
                     </div>
                 </div>
             </main>

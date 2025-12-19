@@ -11,23 +11,8 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("database")
 
-# Pricing per 1M tokens (approximate standard rates)
-PRICING = {
-    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
-    "gpt-4": {"input": 30.00, "output": 60.00},
-    "gpt-4o": {"input": 5.00, "output": 15.00},
-    "claude-3-opus": {"input": 15.00, "output": 75.00},
-    "claude-3-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-3-haiku": {"input": 0.25, "output": 1.25},
-    # Default fallback
-    "default": {"input": 1.00, "output": 3.00}
-}
-
-# Try loading from multiple possible locations
-base_dir = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(base_dir, ".env"))
-load_dotenv(os.path.join(base_dir, "frontend", ".env"))
-load_dotenv() # Fallback to current working directory
+# Production Environment Variable Loading
+load_dotenv() 
 
 class Database:
     def __init__(self):
@@ -63,29 +48,40 @@ class Database:
         return None
 
 
-    def log_request(self, api_key_raw: str, session_id: str, model: str, tokens_in: int, tokens_out: int, tokens_saved: int, latency_ms: float, reconstruction_log: Dict = None):
+    def log_request(self, api_key_raw: str, session_id: str, model: str, original_tokens: int, latency_ms: float, reconstruction_log: Dict = None, or_metadata: Dict = None):
         self._check_db()
         hashed = self._hash_key(api_key_raw)
         now = time.time()
         
-        # Calculate Costs
-        model_pricing = PRICING.get(model)
-        if not model_pricing:
-            # Try partial match or default
-            for k, v in PRICING.items():
-                if k in model:
-                    model_pricing = v
-                    break
-            if not model_pricing:
-                model_pricing = PRICING["default"]
+        # 1. Extract data from OpenRouter metadata or fallback to baseline
+        if or_metadata:
+            tokens_in = or_metadata.get("tokens_prompt", 0)
+            tokens_out = or_metadata.get("tokens_completion", 0)
+            total_cost_usd = or_metadata.get("total_cost", 0)
+            
+            # Calculate savings accurately
+            # tokens_saved is the delta in prompt tokens
+            tokens_saved = max(0, original_tokens - tokens_in)
+            
+            # To find cost saved, we need the price per input token.
+            # We can infer this from the total cost.
+            # cost = (tokens_in * input_price) + (tokens_out * output_price)
+            # A safe approximation for savings: (tokens_saved / tokens_in) * estimated_input_portion_of_cost
+            # Or even better, if we have the cost, we can see the 'unit' cost.
+            total_tokens = tokens_in + tokens_out
+            if total_tokens > 0:
+                avg_price_per_token = total_cost_usd / total_tokens
+                cost_saved_usd = tokens_saved * avg_price_per_token
+            else:
+                cost_saved_usd = 0
+        else:
+            # Fallback for failed metadata fetch
+            tokens_in = original_tokens # Assume no optimization if we can't verify
+            tokens_out = 0
+            tokens_saved = 0
+            total_cost_usd = 0
+            cost_saved_usd = 0
 
-        input_cost = (tokens_in / 1_000_000) * model_pricing["input"]
-        output_cost = (tokens_out / 1_000_000) * model_pricing["output"]
-        total_cost_usd = input_cost + output_cost
-        
-        # Savings are based on input tokens saved
-        cost_saved_usd = (tokens_saved / 1_000_000) * model_pricing["input"]
-        
         analytics_data = {
             "id": str(uuid.uuid4()),
             "hashed_key": hashed,
@@ -98,18 +94,24 @@ class Database:
             "cost_saved_usd": cost_saved_usd,
             "total_cost_usd": total_cost_usd,
             "reconstruction_log": reconstruction_log or {},
-            "timestamp": now
+            "timestamp": now,
+            "or_id": or_metadata.get("id") if or_metadata else None
         }
-        self.supabase.table("analytics").insert(analytics_data).execute()
         
-        key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
-        if key_data.data:
-            new_saved = key_data.data["total_tokens_saved"] + tokens_saved
-            new_reqs = key_data.data["total_requests"] + 1
-            self.supabase.table("api_keys").update({
-                "total_tokens_saved": new_saved,
-                "total_requests": new_reqs
-            }).eq("hashed_key", hashed).execute()
+        try:
+            self.supabase.table("analytics").insert(analytics_data).execute()
+            
+            # Update aggregate stats
+            key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
+            if key_data.data:
+                new_saved = key_data.data["total_tokens_saved"] + tokens_saved
+                new_reqs = key_data.data["total_requests"] + 1
+                self.supabase.table("api_keys").update({
+                    "total_tokens_saved": new_saved,
+                    "total_requests": new_reqs
+                }).eq("hashed_key", hashed).execute()
+        except Exception as e:
+            logger.error(f"DB Insert/Update error: {e}")
 
         return {
             "id": analytics_data["id"],

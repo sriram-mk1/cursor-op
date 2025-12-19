@@ -62,7 +62,7 @@ export default function Dashboard() {
       let key = typeof window !== 'undefined' ? localStorage.getItem("v1_key") : null;
 
       // 2. If no key, fetch from Supabase
-      if (!key || key === "v1-test-key") {
+      if (!key) {
         const { data: { user } } = await supabase.auth.getUser();
         if (user) {
           try {
@@ -83,7 +83,7 @@ export default function Dashboard() {
         }
       }
 
-      setApiKey(key || "v1-test-key");
+      setApiKey(key || "");
     };
     init();
   }, []);
@@ -308,38 +308,45 @@ export default function Dashboard() {
 
                       {log.reconstruction_log?.sequence && log.reconstruction_log.sequence.length > 0 && (
                         <div>
-                          <h3 style={{ fontSize: "12px", fontWeight: 600, marginBottom: "12px", color: "var(--muted)" }}>CONTEXT RECONSTRUCTION SEQUENCE</h3>
-                          <div style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "2px",
-                            background: "rgba(0,0,0,0.2)",
-                            padding: "1px",
-                            borderRadius: "6px",
-                            overflow: "hidden"
-                          }}>
+                          <h3 style={{ fontSize: "12px", fontWeight: 600, marginBottom: "16px", color: "rgba(255,255,255,0.4)" }}>CONTEXT RECONSTRUCTION SEQUENCE</h3>
+                          <div className="sequence-container">
                             {log.reconstruction_log.sequence.map((item, idx) => (
-                              <div key={idx} style={{
-                                display: "flex",
-                                gap: "12px",
-                                padding: "8px 12px",
-                                background: item.source === "user" ? "rgba(255,255,255,0.03)" : "transparent",
-                                fontSize: "12px",
-                                fontFamily: "monospace",
-                                borderLeft: `2px solid ${item.score > 0.5 ? "var(--accent)" : "transparent"}`
-                              }}>
-                                <div style={{ width: "30px", opacity: 0.3 }}>#{item.line_index}</div>
-                                <div style={{ width: "40px", fontWeight: 600, color: item.source === "user" ? "var(--fg)" : "var(--muted)" }}>
-                                  {(item.source || "UNK").toUpperCase().slice(0, 3)}
+                              <motion.div
+                                key={idx}
+                                initial={{ opacity: 0, x: -10 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                transition={{ delay: idx * 0.05 }}
+                                className={`sequence-card ${item.score > 0 ? "optimized" : ""}`}
+                              >
+                                <div style={{ width: "32px", fontSize: "10px", opacity: 0.3, fontFamily: "monospace" }}>
+                                  {item.line_index.toString().padStart(3, '0')}
                                 </div>
-                                <div style={{ flex: 1, opacity: 0.8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                  {item.text || ""}
+                                <div style={{ width: "60px" }}>
+                                  <span className={`sequence-tag ${item.source === 'user' ? 'tag-user' : 'tag-assistant'}`}>
+                                    {item.source?.slice(0, 3)}
+                                  </span>
                                 </div>
-                                <div style={{ width: "60px", textAlign: "right", color: item.score > 0 ? "var(--accent)" : "var(--muted)", opacity: item.score > 0 ? 1 : 0.3 }}>
-                                  {(item.score || 0).toFixed(2)}
+                                <div style={{ flex: 1, fontSize: "12px", opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                  {item.text}
                                 </div>
-                              </div>
+                                <div style={{ width: "80px", textAlign: "right" }}>
+                                  <div style={{ fontSize: "10px", color: item.score > 0 ? "var(--accent)" : "rgba(255,255,255,0.2)" }}>
+                                    {item.score > 0 ? (
+                                      <span style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "4px" }}>
+                                        <TrendingUp size={10} /> {(item.score * 100).toFixed(0)}%
+                                      </span>
+                                    ) : (
+                                      "Dropped"
+                                    )}
+                                  </div>
+                                </div>
+                              </motion.div>
                             ))}
+                            {log.reconstruction_log.total_lines > log.reconstruction_log.sequence.length && (
+                              <div style={{ textAlign: "center", padding: "12px", fontSize: "11px", opacity: 0.3 }}>
+                                + {log.reconstruction_log.total_lines - log.reconstruction_log.sequence.length} lines distilled out
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}

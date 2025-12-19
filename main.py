@@ -3,9 +3,14 @@ import time
 import logging
 import asyncio
 import json
+import hashlib
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+# Load environment variables IMMEDIATELY
+load_dotenv()
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, Request, WebSocket, WebSocketDisconnect
@@ -33,6 +38,10 @@ sh.setFormatter(ToonLog())
 log.addHandler(sh)
 
 # App State
+# Initialized after load_dotenv()
+from context_optimizer.engine import ContextOptimizer, ENCODER
+from database import Database
+
 optimizer = ContextOptimizer()
 db = Database()
 
@@ -208,8 +217,9 @@ async def chat(
         log.info(f"📌 Using provided session: {session_id}")
     
     if not session_id:
-        session_id = f"session_{v1_key}" if v1_key else "default_session"
-        log.info(f"⚠️ Fallback session: {session_id}")
+        # Final fallback for purely stateless calls without conversation prefix
+        session_id = f"s_{v1_key[:8]}" if v1_key else "global_stateless"
+        log.info(f"⚡️ Using fallback: {session_id}")
     
     original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in msgs)
     

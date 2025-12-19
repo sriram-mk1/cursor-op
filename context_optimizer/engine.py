@@ -8,7 +8,6 @@ import time
 import math
 from typing import List, Dict, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field, asdict
-import numpy as np
 import tiktoken
 
 log = logging.getLogger("gateway")
@@ -136,16 +135,23 @@ class AtomizedScorer:
 class ContextOptimizer:
     """V3: Full Structural-Temporal Distillation Engine."""
     def __init__(self):
+        from dotenv import load_dotenv
+        load_dotenv()
+        
         self.scorer = AtomizedScorer()
         self.base_budget = 1800
         self.session_ttl = 86400 # 24 Hours
         
-        # Redis Setup
-        redis_url = os.getenv("REDIS_URL")
+        # Redis Setup: Smart detection for Railway/Render
+        redis_url = os.getenv("REDIS_URL") or os.getenv("REDISURL") or os.getenv("REDISHOST")
+        if redis_url and not redis_url.startswith("redis"):
+            # If Railway only provides HOST, wrap it
+            redis_url = f"redis://{redis_url}"
+            
         if redis_url:
             try:
                 self.redis = redis.from_url(redis_url, decode_responses=True)
-                log.info("📡 [V3 RAG] Connected to Redis KV Cache (Railway)")
+                log.info(f"📡 [V3 RAG] Connected to Redis KV Cache")
             except Exception as e:
                 log.error(f"❌ Redis connection failed: {e}")
                 self.redis = None
@@ -319,5 +325,14 @@ class ContextOptimizer:
             "specificity": specificity,
             "budget": max_tokens,
             "selected_lines": len(packed_lines),
-            "overhead_ms": overhead
+            "overhead_ms": overhead,
+            "sequence": [
+                {
+                    "source": a.source,
+                    "text": a.text,
+                    "score": a.score,
+                    "line_index": a.line_index
+                }
+                for a in final_atoms[:30]  # Sample top 30 for UI performance
+            ]
         }

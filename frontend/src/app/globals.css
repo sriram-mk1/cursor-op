@@ -6,10 +6,15 @@
   --border: rgba(255, 255, 255, 0.08);
   --glass: rgba(255, 255, 255, 0.02);
   --glass-hover: rgba(255, 255, 255, 0.05);
-  --radius: 2px;
-  --font-mono: 'Geist Mono', 'JetBrains Mono', monospace;
+  --radius-sm: 2px;
+  --radius-md: 6px;
+  --radius-lg: 12px;
+  --font-mono: 'Geist Mono',
+    'JetBrains Mono',
+    monospace;
   --sidebar-width: 240px;
   --sidebar-collapsed-width: 72px;
+  --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
 * {
@@ -262,6 +267,7 @@ h4 {
   color: rgba(255, 255, 255, 0.5);
   border-bottom: 1px solid var(--border);
 }
+
 /* Modals */
 .modal-overlay {
   position: fixed;
@@ -286,4 +292,100 @@ h4 {
   box-shadow: 0 32px 64px rgba(0, 0, 0, 0.6);
   padding: 32px;
   position: relative;
+}
+
+/* Sequence Cards */
+.sequence-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: var(--radius-md);
+}
+
+.sequence-card {
+  background: var(--glass);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  transition: all 0.2s ease;
+}
+
+.sequence-card:hover {
+  background: var(--glass-hover);
+  border-color: var(--accent);
+}
+
+.sequence-card.optimized {
+  border-left: 3px solid var(--accent);
+}
+
+.sequence-tag {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 2px;
+  text-transform: uppercase;
+}
+
+.tag-user {
+  background: rgba(0, 255, 136, 0.1);
+  color: var(--accent);
+}
+
+.tag-assistant {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+/* Chart Utilities */
+.bar-chart-container {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: 120px;
+  padding: 10px 0;
+}
+
+.bar-column {
+  flex: 1;
+  background: var(--accent-muted);
+  border-radius: 2px 2px 0 0;
+  position: relative;
+  transition: all 0.3s ease;
+}
+
+.bar-column:hover {
+  background: var(--accent);
+}
+
+.bar-column::after {
+  content: attr(data-value);
+  position: absolute;
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.bar-column:hover::after {
+  opacity: 1;
+}
+
+.savings-badge {
+  background: var(--accent);
+  color: #000;
+  padding: 2px 6px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
