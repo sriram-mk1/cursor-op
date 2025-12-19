@@ -231,17 +231,21 @@ class ContextOptimizer:
         history = session["history"]
         atoms = session["atoms"]
         
-        # Phase 4: Boilerplate Noise Filters
+        # Phase 4: Boilerplate Noise Filters (The "Blackhole" Filter)
         NOISE_PATTERNS = [
-            r"# (VSCode Visible Files|VSCode Open Tabs|Current Time|Current Cost|Current Mode)",
+            r"<(task|environment_details|slug|name|model|tool_format|todos|update_todo_list)>",
+            r"</(task|environment_details|slug|name|model|tool_format|todos|update_todo_list)>",
+            r"# (VSCode Visible Files|VSCode Open Tabs|Current Time|Current Cost|Current Mode|Current Workspace Directory-)",
             r"Current time in ISO 8601",
             r"User time zone:",
+            r"No files found\.",
+            r"^\$?\d+\.\d{2}$", # Catches $0.00
             r"You have not created a todo list yet",
             r"REMINDERS",
             r"\| # \| Content \| Status \|",
             r"\[(ask_followup_question|update_todo_list)\] Result:"
         ]
-        noise_re = [re.compile(p) for p in NOISE_PATTERNS]
+        noise_re = [re.compile(p, re.IGNORECASE) for p in NOISE_PATTERNS]
 
         changed = False
         new_atoms = []
