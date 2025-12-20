@@ -67,9 +67,6 @@ class Database:
             t_in, t_out, t_saved, t_cost, c_saved = original_tokens, 0, 0, 0, 0
 
         try:
-            # 2. Check if a conversation row already exists for this session
-            existing = self.supabase.table("analytics").select("*").eq("session_id", session_id).execute()
-            
             analytics_data = {
                 "hashed_key": hashed,
                 "session_id": session_id,
@@ -86,24 +83,21 @@ class Database:
                 "raw_messages": raw_messages, # Full observability
                 "response_message": response_message # Full observability
             }
-
-            if existing.data:
-                # Update existing session record
-                res_id = existing.data[0]["id"]
-                self.supabase.table("analytics").update(analytics_data).eq("id", res_id).execute()
-            else:
-                # Create NEW row for this conversation
-                res_id = str(uuid.uuid4())
-                analytics_data["id"] = res_id
-                self.supabase.table("analytics").insert(analytics_data).execute()
+            # 2. Create NEW row for this conversation (Observability: One row per request)
+            res_id = str(uuid.uuid4())
+            analytics_data["id"] = res_id
+            self.supabase.table("analytics").insert(analytics_data).execute()
 
             # 3. Update global API Key aggregate stats
-            key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
-            if key_data.data:
-                self.supabase.table("api_keys").update({
-                    "total_tokens_saved": key_data.data["total_tokens_saved"] + t_saved,
-                    "total_requests": key_data.data["total_requests"] + 1
-                }).eq("hashed_key", hashed).execute()
+            try:
+                key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
+                if key_data.data:
+                    self.supabase.table("api_keys").update({
+                        "total_tokens_saved": (key_data.data.get("total_tokens_saved") or 0) + t_saved,
+                        "total_requests": (key_data.data.get("total_requests") or 0) + 1
+                    }).eq("hashed_key", hashed).execute()
+            except Exception as ke:
+                logger.warning(f"Could not update key stats: {ke}")
 
         except Exception as e:
             logger.error(f"DB Upsert Error: {e}")
@@ -126,15 +120,19 @@ class Database:
     def get_stats(self, api_key_raw: str):
         self._check_db()
         hashed = self._hash_key(api_key_raw)
-        key_response = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
-        if not key_response.data:
+        try:
+            key_response = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
+            if not key_response.data:
+                return None
+            
+            recent_response = self.supabase.table("analytics").select("*").eq("hashed_key", hashed).order("timestamp", desc=True).limit(50).execute()
+            return {
+                "total_tokens_saved": key_response.data.get("total_tokens_saved") or 0,
+                "total_requests": key_response.data.get("total_requests") or 0,
+                "recent_requests": recent_response.data or []
+            }
+        except Exception:
             return None
-        recent_response = self.supabase.table("analytics").select("*").eq("hashed_key", hashed).order("timestamp", desc=True).limit(50).execute()
-        return {
-            "total_tokens_saved": key_response.data["total_tokens_saved"],
-            "total_requests": key_response.data["total_requests"],
-            "recent_requests": recent_response.data
-        }
 
     def get_user_stats(self, user_id: str):
         """Aggregate stats for all keys belonging to a user (Dashboard Home)."""
@@ -211,17 +209,14 @@ class Database:
     def save_session_state(self, session_id: str, data: Dict[str, Any]):
         self._check_db()
         try:
-            # Upsert logic
-            existing = self.supabase.table("sessions").select("id").eq("session_id", session_id).execute()
-            if existing.data:
-                self.supabase.table("sessions").update({"data": data, "updated_at": time.time()}).eq("session_id", session_id).execute()
-            else:
-                self.supabase.table("sessions").insert({
-                    "session_id": session_id,
-                    "data": data,
-                    "created_at": time.time(),
-                    "updated_at": time.time()
-                }).execute()
+            now = time.time()
+            # Use upsert provided by supabase-py (uses PostgreSQL ON CONFLICT)
+            # Requires a primary key on the table (session_id)
+            self.supabase.table("sessions").upsert({
+                "session_id": session_id,
+                "data": data,
+                "updated_at": now
+            }, on_conflict="session_id").execute()
         except Exception as e:
             logger.error(f"Session save failed for {session_id}: {e}")
             raise e
