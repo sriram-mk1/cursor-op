@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { motion } from "framer-motion";
-import { ArrowLeft, Clock, Database, Zap, Shield, Cpu, Code, MessageSquare, ChevronRight, Activity } from "lucide-react";
+import { ArrowLeft, Clock, Database, Zap, Shield, Cpu, Code, MessageSquare, ChevronRight, Activity, Layers } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { createClient } from "@/utils/supabase";
