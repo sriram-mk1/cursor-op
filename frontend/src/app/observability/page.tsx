@@ -3,25 +3,17 @@
 import { useEffect, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-    ChevronDown, ArrowRight, MessageSquare, Clock,
-    Terminal, Sparkles, Layout, ExternalLink, Search
+    ChevronDown, ArrowRight, Clock,
+    Sparkles, Layout, Search, Zap, Code
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
-import { HeroSphere } from "@/components/HeroSphere";
+import { HeroCubes } from "@/components/HeroCubes";
 import { createClient } from "@/utils/supabase";
 
 // --- Types ---
-interface Conversation {
-    id: string;
-    session_id: string;
-    title: string;
-    last_request_at: number;
-}
-
 interface AnalyticsRow {
     id: string;
-    conversation_id: string;
     model: string;
     tokens_in: number;
     tokens_out: number;
@@ -42,8 +34,6 @@ interface AnalyticsRow {
 
 export default function ObservabilityPage() {
     const router = useRouter();
-    const [conversations, setConversations] = useState<Conversation[]>([]);
-    const [selectedConvo, setSelectedConvo] = useState<string>("");
     const [requests, setRequests] = useState<AnalyticsRow[]>([]);
     const [selectedRequest, setSelectedRequest] = useState<AnalyticsRow | null>(null);
     const [loading, setLoading] = useState(true);
@@ -52,7 +42,7 @@ export default function ObservabilityPage() {
     const supabase = createClient();
 
     useEffect(() => {
-        const fetchStats = async () => {
+        const fetchRequests = async () => {
             const { data: { user } } = await supabase.auth.getUser();
             if (user) {
                 try {
@@ -60,62 +50,44 @@ export default function ObservabilityPage() {
                         headers: { "x-user-id": user.id }
                     });
                     const data = await resp.json();
-                    setConversations(data.recent_conversations || []);
+                    const sorted = (data.recent_requests || []).sort((a: any, b: any) => b.timestamp - a.timestamp);
+                    setRequests(sorted);
+                    if (sorted.length > 0) setSelectedRequest(sorted[0]);
                 } catch (e) {
-                    console.error("Failed to fetch conversations", e);
+                    console.error("Failed to fetch requests", e);
                 }
                 setLoading(false);
             }
         };
-        fetchStats();
+        fetchRequests();
     }, [supabase.auth]);
-
-    const handleConvoChange = async (id: string) => {
-        setSelectedConvo(id);
-        setSelectedRequest(null);
-        if (!id) return;
-
-        try {
-            const resp = await fetch(`${GATEWAY_URL}/api/conversations/${id}`);
-            const data = await resp.json();
-            setRequests(data.requests || []);
-            // Auto-select the last request in the convo
-            if (data.requests?.length > 0) {
-                setSelectedRequest(data.requests[data.requests.length - 1]);
-            }
-        } catch (e) {
-            console.error("Failed to fetch conversation details", e);
-        }
-    };
 
     return (
         <div className="app-container">
             <Sidebar />
-            <main className="main-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '60px', gap: '20px' }}>
+            <main className="main-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '40px', gap: '0px' }}>
 
-                {/* Sphere Above Title */}
+                {/* Animated Cubes Above Title */}
                 <motion.div
-                    initial={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 1.5, ease: "easeOut" }}
-                    style={{ width: '100%', maxWidth: '400px', marginBottom: '-40px' }}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ duration: 1 }}
+                    style={{ width: '100%', maxWidth: '500px', height: '240px' }}
                 >
-                    <HeroSphere />
+                    <HeroCubes />
                 </motion.div>
 
-                {/* Minimalist Title Section */}
-                <div style={{ textAlign: 'center', zIndex: 10 }}>
+                {/* Minimalist Title */}
+                <div style={{ textAlign: 'center', marginBottom: '40px' }}>
                     <motion.h1
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         style={{
-                            fontSize: '42px',
+                            fontSize: '36px',
                             fontWeight: 800,
-                            letterSpacing: '-0.04em',
-                            marginBottom: '12px',
-                            background: 'linear-gradient(to bottom, #fff, rgba(255,255,255,0.5))',
-                            WebkitBackgroundClip: 'text',
-                            WebkitTextFillColor: 'transparent'
+                            letterSpacing: '-0.05em',
+                            marginBottom: '8px',
+                            color: '#fff'
                         }}
                     >
                         Deep Observability
@@ -123,93 +95,81 @@ export default function ObservabilityPage() {
                     <motion.p
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 0.4 }}
-                        style={{ fontSize: '15px', fontWeight: 500 }}
+                        style={{ fontSize: '14px', fontWeight: 500 }}
                     >
-                        Select a session to analyze context reconstruction
+                        Real-time context reconstruction analysis
                     </motion.p>
                 </div>
 
-                {/* Simple Dropdown Selection */}
+                {/* Request Selection Dropdown */}
                 <motion.div
-                    initial={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.2 }}
-                    style={{ width: '100%', maxWidth: '440px', display: 'flex', flexDirection: 'column', gap: '12px', zIndex: 10 }}
+                    style={{ width: '100%', maxWidth: '500px', marginBottom: '40px' }}
                 >
                     <div className="custom-select-wrapper">
                         <select
-                            value={selectedConvo}
-                            onChange={(e) => handleConvoChange(e.target.value)}
+                            value={selectedRequest?.id || ""}
+                            onChange={(e) => setSelectedRequest(requests.find(r => r.id === e.target.value) || null)}
                             className="glass custom-select"
                         >
-                            <option value="" disabled>─ Select Conversation ─</option>
-                            {conversations.map(c => (
-                                <option key={c.id} value={c.id}>
-                                    {c.title} ({new Date(c.last_request_at * 1000).toLocaleDateString()})
+                            {requests.map((r, i) => (
+                                <option key={r.id} value={r.id}>
+                                    {new Date(r.timestamp * 1000).toLocaleString()} • {r.model}
                                 </option>
                             ))}
+                            {requests.length === 0 && <option value="" disabled>No requests found</option>}
                         </select>
                         <ChevronDown className="select-icon" size={16} />
                     </div>
-
-                    {requests.length > 0 && (
-                        <div className="custom-select-wrapper">
-                            <select
-                                value={selectedRequest?.id || ""}
-                                onChange={(e) => setSelectedRequest(requests.find(r => r.id === e.target.value) || null)}
-                                className="glass custom-select"
-                            >
-                                {requests.map((r, i) => (
-                                    <option key={r.id} value={r.id}>
-                                        Request #{i + 1} • {r.model} • {new Date(r.timestamp * 1000).toLocaleTimeString()}
-                                    </option>
-                                ))}
-                            </select>
-                            <ChevronDown className="select-icon" size={16} />
-                        </div>
-                    )}
                 </motion.div>
 
-                {/* Preview Section */}
-                <div style={{ width: '100%', maxWidth: '800px', marginTop: '20px' }}>
+                {/* Preview Section - Bento Box Style (like Analytics page) */}
+                <div style={{ width: '100%', maxWidth: '1000px', padding: '0 20px' }}>
                     <AnimatePresence mode="wait">
                         {selectedRequest ? (
                             <motion.div
                                 key={selectedRequest.id}
-                                initial={{ opacity: 0, y: 20 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, y: -20 }}
-                                style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}
+                                initial={{ opacity: 0, scale: 0.98 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0.98 }}
+                                style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}
                             >
-                                {/* Visual Preview Cards */}
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
-                                    <div className="glass card preview-card">
-                                        <div className="preview-label"><Sparkles size={12} /> EFFICIENCY</div>
-                                        <div className="preview-value">
+                                {/* Metrics Row */}
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
+                                    <div className="glass bento-item">
+                                        <div className="bento-label"><Zap size={12} /> SAVINGS</div>
+                                        <div className="bento-value">
                                             {((selectedRequest.tokens_saved / (selectedRequest.tokens_in + selectedRequest.tokens_saved)) * 100).toFixed(1)}%
                                         </div>
                                     </div>
-                                    <div className="glass card preview-card">
-                                        <div className="preview-label"><Clock size={12} /> LATENCY</div>
-                                        <div className="preview-value">{selectedRequest.latency_ms.toFixed(0)}ms</div>
+                                    <div className="glass bento-item">
+                                        <div className="bento-label"><Clock size={12} /> LATENCY</div>
+                                        <div className="bento-value">{selectedRequest.latency_ms.toFixed(0)}<span style={{ fontSize: '12px' }}>ms</span></div>
                                     </div>
-                                    <div className="glass card preview-card">
-                                        <div className="preview-label"><Layout size={12} /> RECONSTRUCTION</div>
-                                        <div className="preview-value">{selectedRequest.reconstruction_log?.sequence?.length || 0} <span style={{ fontSize: '10px', opacity: 0.4 }}>chunks</span></div>
+                                    <div className="glass bento-item">
+                                        <div className="bento-label"><Layout size={12} /> CHUNKS</div>
+                                        <div className="bento-value">{selectedRequest.reconstruction_log?.sequence?.length || 0}</div>
+                                    </div>
+                                    <div className="glass bento-item">
+                                        <div className="bento-label"><Code size={12} /> TOKENS</div>
+                                        <div className="bento-value">{selectedRequest.tokens_in}</div>
                                     </div>
                                 </div>
 
-                                {/* Reconstruction Context Preview (Few Cards) */}
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                    <div style={{ fontSize: '11px', fontWeight: 700, opacity: 0.3, letterSpacing: '0.1em', marginBottom: '8px' }}>RECONSTRUCTION PREVIEW</div>
+                                {/* Reconstruction Preview Chunks */}
+                                <div className="glass" style={{ padding: '24px', borderRadius: '24px' }}>
+                                    <div style={{ fontSize: '11px', fontWeight: 800, opacity: 0.3, letterSpacing: '0.1em', marginBottom: '20px' }}>CONTEXT RECONSTRUCTION SEQUENCE</div>
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                                         {selectedRequest.reconstruction_log?.sequence?.slice(0, 4).map((item, i) => (
-                                            <div key={i} className="glass card" style={{ padding: '12px', border: '1px solid rgba(255,255,255,0.03)' }}>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                                    <span style={{ fontSize: '9px', fontWeight: 800, color: 'var(--accent)' }}>HIT {(item.score * 100).toFixed(0)}%</span>
-                                                    <span style={{ fontSize: '9px', opacity: 0.2 }}>L-{item.line_index}</span>
+                                            <div key={i} className="glass" style={{ padding: '16px', borderRadius: '16px', border: '1px solid rgba(255,255,255,0.03)', background: 'rgba(255,255,255,0.01)' }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                    <span style={{ fontSize: '10px', fontWeight: 800, color: i < 2 ? 'var(--accent)' : 'rgba(255,255,255,0.4)' }}>
+                                                        {item.score ? `HIT ${(item.score * 100).toFixed(0)}%` : 'HISTORY'}
+                                                    </span>
+                                                    <span style={{ fontSize: '10px', opacity: 0.2 }}>L-{item.line_index}</span>
                                                 </div>
-                                                <div style={{ fontSize: '12px', opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                <div style={{ fontSize: '13px', opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'monospace' }}>
                                                     {item.text}
                                                 </div>
                                             </div>
@@ -217,25 +177,37 @@ export default function ObservabilityPage() {
                                     </div>
                                 </div>
 
-                                {/* Navigation Button */}
+                                {/* Big Go-To Button */}
                                 <motion.button
-                                    whileHover={{ scale: 1.02, backgroundColor: 'var(--fg)' }}
-                                    whileTap={{ scale: 0.98 }}
+                                    whileHover={{ scale: 1.01, backgroundColor: '#fff', color: '#000' }}
+                                    whileTap={{ scale: 0.99 }}
                                     onClick={() => router.push(`/analytics/${selectedRequest.id}`)}
-                                    className="go-to-btn"
+                                    style={{
+                                        height: '70px',
+                                        borderRadius: '24px',
+                                        background: 'rgba(255,255,255,0.05)',
+                                        border: '1px solid rgba(255,255,255,0.1)',
+                                        color: '#fff',
+                                        fontSize: '16px',
+                                        fontWeight: 700,
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '12px',
+                                        cursor: 'pointer',
+                                        transition: 'all 0.2s ease',
+                                        marginTop: '10px'
+                                    }}
                                 >
-                                    Explore Deep Observability <ArrowRight size={18} />
+                                    Enter Deep Observer <ArrowRight size={20} />
                                 </motion.button>
+
                             </motion.div>
                         ) : !loading && (
-                            <motion.div
-                                initial={{ opacity: 0 }}
-                                animate={{ opacity: 0.2 }}
-                                style={{ textAlign: 'center', padding: '100px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}
-                            >
-                                <Search size={40} />
-                                <p style={{ fontSize: '14px' }}>No session selected</p>
-                            </motion.div>
+                            <div style={{ textAlign: 'center', padding: '100px 0', opacity: 0.2 }}>
+                                <Search size={40} style={{ margin: '0 auto 16px' }} />
+                                <p>No requests found for this account</p>
+                            </div>
                         )}
                     </AnimatePresence>
                 </div>
@@ -250,72 +222,53 @@ export default function ObservabilityPage() {
         .custom-select {
           width: 100%;
           appearance: none;
-          padding: 16px 20px;
-          border-radius: 14px;
-          font-size: 14px;
-          font-weight: 500;
-          color: rgba(255,255,255,0.9);
-          border: 1px solid rgba(255,255,255,0.05);
+          padding: 18px 24px;
+          border-radius: 20px;
+          font-size: 15px;
+          font-weight: 600;
+          color: #fff;
+          border: 1px solid rgba(255,255,255,0.08);
           cursor: pointer;
+          background: rgba(255,255,255,0.02);
           transition: all 0.2s ease;
           outline: none;
         }
         .custom-select:hover {
-          border-color: rgba(255,255,255,0.15);
-          background: rgba(255,255,255,0.04);
+          background: rgba(255,255,255,0.05);
+          border-color: rgba(255,255,255,0.2);
         }
         .select-icon {
           position: absolute;
-          right: 20px;
+          right: 24px;
           top: 50%;
           transform: translateY(-50%);
           pointer-events: none;
-          opacity: 0.3;
+          opacity: 0.4;
         }
-        .preview-card {
-           padding: 20px;
-           text-align: center;
-           display: flex;
-           flex-direction: column;
-           gap: 8px;
-           background: rgba(255,255,255,0.01);
+        .bento-item {
+           padding: 24px;
+           border-radius: 24px;
+           text-align: left;
+           background: rgba(255,255,255,0.02);
         }
-        .preview-label {
+        .bento-label {
            font-size: 10px;
-           font-weight: 800;
-           letter-spacing: 0.05em;
+           font-weight: 900;
+           letter-spacing: 0.1em;
            opacity: 0.3;
            display: flex;
            align-items: center;
-           justify-content: center;
-           gap: 6px;
+           gap: 8px;
+           margin-bottom: 12px;
         }
-        .preview-value {
-           font-size: 24px;
+        .bento-value {
+           font-size: 28px;
            font-weight: 800;
-           letter-spacing: -0.02em;
-        }
-        .go-to-btn {
-           margin-top: 20px;
-           width: 100%;
-           height: 60px;
-           background: #fff;
-           color: #000;
-           border: none;
-           border-radius: 16px;
-           font-size: 15px;
-           font-weight: 700;
-           cursor: pointer;
-           display: flex;
-           align-items: center;
-           justify-content: center;
-           gap: 12px;
-           transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+           letter-spacing: -0.03em;
         }
         option {
-          background: #0a0a0a;
+          background: #000;
           color: #fff;
-          padding: 10px;
         }
       `}</style>
         </div>
