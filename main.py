@@ -299,17 +299,18 @@ async def chat(
                     
                     full_content = ""
                     gen_id = None
-                    async for chunk in resp.aiter_lines():
-                        if not chunk: continue
-                        yield (chunk + "\n").encode()
-                        if chunk.startswith("data: "):
-                            content = chunk[6:].strip()
+                    async for line in resp.aiter_lines():
+                        yield (line + "\n").encode()
+                        
+                        if line.startswith("data: "):
+                            content = line[6:].strip()
                             if content == "[DONE]": continue
                             try:
                                 d = json.loads(content)
                                 if not gen_id: gen_id = d.get("id")
                                 delta = d.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                full_content += delta
+                                if delta:
+                                    full_content += delta
                             except: pass
                     
                     background_tasks.add_task(log_and_broadcast, gen_id, 200, (time.time() - start_time) * 1000, {"role": "assistant", "content": full_content})
@@ -321,14 +322,6 @@ async def chat(
             resp_msg = resp_json.get("choices", [{}])[0].get("message")
             background_tasks.add_task(log_and_broadcast, resp_json.get("id"), resp.status_code, (time.time() - start_time) * 1000, resp_msg)
             return JSONResponse(content=resp_json, status_code=resp.status_code)
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "uptime": int(time.time() - app.state.start_time)}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
 @app.get("/health")
 async def health():
