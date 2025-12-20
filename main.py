@@ -208,49 +208,23 @@ async def chat(
     if not or_key:
         raise HTTPException(status_code=401, detail="Missing OpenRouter API Key. Provide it in payload, Authorization header, or link it to your V1 key in the dashboard.")
 
-    # 2. Session Tracking & History Sync
-    session_id = request.session_id or x_session_id
+    # 2. History Scope (Strictly Request-Only Isolation)
     msgs = request.messages or []
     if request.prompt and not msgs:
         msgs = [{"role": "user", "content": request.prompt}]
 
-    if not session_id and msgs:
-        key_id = v1_key[:8] if v1_key else "anon"
-        first_content = str(msgs[0].get("content", ""))
-        fingerprint = hashlib.md5(f"{key_id}:{first_content[:500]}".encode()).hexdigest()[:12]
-        session_id = f"s_{key_id}_{fingerprint}"
-
-    # --- Ghost Session Logic (Supabase Powered) ---
-    # We maintain the "True History" in Supabase to understand context growth
-    db_state = db.get_session_state(session_id) or {"history": []}
-    raw_history = db_state["history"]
-    
-    # Sync new turns
-    if msgs:
-        if not raw_history or msgs[0].get("content") != raw_history[0].get("content"):
-            raw_history = msgs
-        else:
-            # Sync only new turns
-            if len(msgs) > len(raw_history):
-                for m in msgs[len(raw_history):]:
-                    raw_history.append(m)
-    
-    original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in raw_history)
+    session_id = request.session_id or x_session_id or "default"
+    current_payload_history = msgs
+    original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in current_payload_history)
     
     # 3. Context Reconstruction (Observability Phase)
-    # We pass the full raw_history to the optimizer.
-    # IMPORTANT: The optimizer will now only perform splitting, reconstruction and rebuilding.
-    # No extra fields or formatting changes are allowed.
     optimized_msgs = msgs
     reconstruction_log = {}
 
-    if request.enable_optimization and len(raw_history) > 1 and key_data:
+    if request.enable_optimization and len(current_payload_history) > 1 and key_data:
         try:
             user_key_id = v1_key or "anon"
-            # The engine now handles simple reconstruction/splitting
-            optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, raw_history)
-            if reconstruction_log and "total_history_tokens" in reconstruction_log:
-                original_tokens = reconstruction_log["total_history_tokens"]
+            optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, current_payload_history)
         except Exception as e:
             log.error(f"Optimization Error: {e}")
 

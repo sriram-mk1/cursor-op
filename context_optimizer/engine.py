@@ -84,44 +84,54 @@ class ContextOptimizer:
     def optimize(self, user_key: str, session_id: str, messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         start_time = time.time()
         
-        # 1. Split into atoms
-        atoms = self.reconstructor.split_into_atoms(messages)
-        if not atoms: return messages, {}
+        if not messages or len(messages) <= 1:
+            return messages, {}
+
+        # 1. Isolate the current query and history
+        # We only do RAG over the history (exclude the very last message)
+        history = messages[:-1]
+        active_query_msg = messages[-1]
         
-        # 2. Score based on last user message
-        query = messages[-1].get("content", "")
+        # 2. Split history into atoms
+        atoms = self.reconstructor.split_into_atoms(history)
+        if not atoms: 
+            return messages, {}
+        
+        # 3. Score based on active query
+        query = active_query_msg.get("content", "")
         if not isinstance(query, str): query = json.dumps(query)
         
         scored_atoms = self.reconstructor.score_atoms(atoms, query)
         
-        # 3. Select top atoms and their context
-        # We want to keep the most relevant lines
+        # 4. Select top atoms from history
         top_atoms = sorted(scored_atoms, key=lambda x: x.score, reverse=True)[:50]
         selected_indices = set()
         for atom in top_atoms:
-            # Add neighbors for flow
-            for i in range(atom.line_index - 2, atom.line_index + 3):
+            # Keep neighbors for flow
+            for i in range(atom.line_index - 1, atom.line_index + 2):
                 if 0 <= i < len(atoms):
                     selected_indices.add(i)
         
         reconstructed_atoms = sorted([atoms[i] for i in selected_indices], key=lambda x: x.line_index)
         
-        # 4. Rebuild the context block
+        # 5. Rebuild the context block
         packed_lines = [a.text for a in reconstructed_atoms]
         
         optimized = []
-        sys_prompt = next((m for m in messages if m.get("role") == "system"), None)
+        # Preserve original system prompt if it exists in history
+        sys_prompt = next((m for m in history if m.get("role") == "system"), None)
         if sys_prompt: optimized.append(sys_prompt)
         
         if packed_lines:
             context_text = (
-                "--- RECONSTRUCTED CONTEXT ---\n"
+                "--- HISTORICAL CONTEXT RECONSTRUCTION ---\n"
                 + "\n".join(packed_lines)
-                + "\n--- END CONTEXT ---"
+                + "\n--- END RECONSTRUCTION ---"
             )
             optimized.append({"role": "system", "content": context_text})
             
-        optimized.append(messages[-1])
+        # Always append the active query at the end
+        optimized.append(active_query_msg)
         
         return optimized, {
             "total_lines": len(atoms),
