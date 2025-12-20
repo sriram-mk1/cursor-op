@@ -47,6 +47,28 @@ class Database:
             return response.data[0]
         return None
 
+    def get_or_create_conversation(self, session_id: str, v1_key: str, user_id: str = None) -> str:
+        self._check_db()
+        hashed = self._hash_key(v1_key)
+        # Check if conversation exists for this session
+        res = self.supabase.table("conversations").select("id").eq("session_id", session_id).execute()
+        if res.data:
+            convo_id = res.data[0]["id"]
+            self.supabase.table("conversations").update({"last_request_at": time.time()}).eq("id", convo_id).execute()
+            return convo_id
+        
+        # Create new conversation
+        convo_id = str(uuid.uuid4())
+        self.supabase.table("conversations").insert({
+            "id": convo_id,
+            "session_id": session_id,
+            "hashed_key": hashed,
+            "user_id": user_id,
+            "title": f"Conversation {session_id[:8]}",
+            "last_request_at": time.time()
+        }).execute()
+        return convo_id
+
 
     def log_request(self, api_key_raw: str, session_id: str, model: str, original_tokens: int, latency_ms: float, reconstruction_log: Dict = None, or_metadata: Dict = None, raw_messages: List = None, response_message: Dict = None):
         self._check_db()
@@ -67,8 +89,12 @@ class Database:
             t_in, t_out, t_saved, t_cost, c_saved = original_tokens, 0, 0, 0, 0
 
         try:
+            # 0. Get the Conversation ID
+            convo_id = self.get_or_create_conversation(session_id, api_key_raw)
+
             analytics_data = {
                 "hashed_key": hashed,
+                "conversation_id": convo_id,
                 "session_id": session_id,
                 "model": model,
                 "tokens_in": t_in,
@@ -83,7 +109,7 @@ class Database:
                 "raw_messages": raw_messages, # Full observability
                 "response_message": response_message # Full observability
             }
-            # 2. Create NEW row for this conversation (Observability: One row per request)
+            # 2. Create NEW row (Observability: One row per request)
             res_id = str(uuid.uuid4())
             analytics_data["id"] = res_id
             self.supabase.table("analytics").insert(analytics_data).execute()
@@ -135,24 +161,36 @@ class Database:
             return None
 
     def get_user_stats(self, user_id: str):
-        """Aggregate stats for all keys belonging to a user (Dashboard Home)."""
+        """Aggregate stats + fetch recent conversations."""
         self._check_db()
-        # 1. Get all keys for user
         keys = self.supabase.table("api_keys").select("hashed_key, total_tokens_saved, total_requests").eq("user_id", user_id).execute()
         if not keys.data:
-            return {"total_tokens_saved": 0, "total_requests": 0, "recent_requests": []}
+            return {"total_tokens_saved": 0, "total_requests": 0, "recent_requests": [], "recent_conversations": []}
         
         hashes = [k["hashed_key"] for k in keys.data]
         total_saved = sum(k["total_tokens_saved"] for k in keys.data)
         total_reqs = sum(k["total_requests"] for k in keys.data)
         
-        # 2. Get latest requests across ALL keys
-        recent = self.supabase.table("analytics").select("*").in_("hashed_key", hashes).order("timestamp", desc=True).limit(50).execute()
+        # 1. Latest Analytics
+        recent = self.supabase.table("analytics").select("*").in_("hashed_key", hashes).order("timestamp", desc=True).limit(25).execute()
+        
+        # 2. Latest Conversations
+        convos = self.supabase.table("conversations").select("*").in_("hashed_key", hashes).order("last_request_at", desc=True).limit(10).execute()
         
         return {
             "total_tokens_saved": total_saved,
             "total_requests": total_reqs,
-            "recent_requests": recent.data
+            "recent_requests": recent.data,
+            "recent_conversations": convos.data
+        }
+
+    def get_conversation_detail(self, convo_id: str):
+        self._check_db()
+        convo = self.supabase.table("conversations").select("*").eq("id", convo_id).single().execute()
+        requests = self.supabase.table("analytics").select("*").eq("conversation_id", convo_id).order("timestamp", asc=True).execute()
+        return {
+            "conversation": convo.data,
+            "requests": requests.data
         }
 
     def create_key(self, name: str, user_id: str, openrouter_key: str = "") -> Dict[str, Any]:

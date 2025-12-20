@@ -10,10 +10,22 @@ create table if not exists api_keys (
   openrouter_key text
 );
 
--- Create Analytics Table (V4: Deep Observability)
+-- Create Conversations Table (V5: Grouping Requests)
+create table if not exists conversations (
+  id uuid primary key default gen_random_uuid(),
+  session_id text unique not null,
+  user_id text,
+  hashed_key text references api_keys(hashed_key),
+  title text,
+  last_request_at double precision,
+  metadata jsonb
+);
+
+-- Create Analytics Table (V5: Linked to Conversations)
 create table if not exists analytics (
   id text primary key,
   hashed_key text references api_keys(hashed_key),
+  conversation_id uuid references conversations(id),
   session_id text,
   model text,
   tokens_in int,
@@ -22,24 +34,25 @@ create table if not exists analytics (
   latency_ms double precision,
   cost_saved_usd double precision,
   total_cost_usd double precision,
-  reconstruction_log jsonb,
+  reconstruction_log jsonb, -- Stores the chunks and their scores
   timestamp double precision,
   or_id text,
   
   -- Observability Extensions
-  raw_messages jsonb, -- The exact messages received by the gateway
-  response_message jsonb, -- The exact response from OpenRouter
-  optimized_prompt text -- The final prompt that was actually sent (if optimized)
+  raw_messages jsonb, -- The exact messages received
+  response_message jsonb, -- The exact response
+  optimized_prompt text -- The final prompt sent
 );
 
--- Create Filtered Index for Faster Stats Aggregation
+-- Create Indexes
+create index if not exists idx_analytics_convo on analytics(conversation_id);
 create index if not exists idx_analytics_key_timestamp on analytics(hashed_key, timestamp desc);
-create index if not exists idx_analytics_session on analytics(session_id);
+create index if not exists idx_conversations_user on conversations(user_id);
 
--- Create Sessions Table (Replaces Redis)
+-- Create Sessions Table (The "Living State")
 create table if not exists sessions (
   session_id text primary key,
-  data jsonb not null, -- Stores the compressed history + atom list
+  data jsonb not null, 
   created_at double precision,
   updated_at double precision
 );

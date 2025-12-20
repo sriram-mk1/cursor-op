@@ -121,6 +121,10 @@ async def get_stats(x_v1_key: Optional[str] = Header(None, alias="x-v1-key")):
 async def get_user_stats(x_user_id: str = Header(..., alias="x-user-id")):
     return db.get_user_stats(x_user_id)
 
+@app.get("/api/conversations/{convo_id}")
+async def get_conversation(convo_id: str):
+    return db.get_conversation_detail(convo_id)
+
 @app.get("/api/keys")
 async def list_keys(x_user_id: str = Header(..., alias="x-user-id")):
     return db.list_keys(x_user_id)
@@ -233,15 +237,17 @@ async def chat(
     
     original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in raw_history)
     
-    # 3. Context Window Discovery (Observability Phase)
-    # We pass the full raw_history to the optimizer, but it might just be 
-    # logging for now if optimization is disabled.
+    # 3. Context Reconstruction (Observability Phase)
+    # We pass the full raw_history to the optimizer.
+    # IMPORTANT: The optimizer will now only perform splitting, reconstruction and rebuilding.
+    # No extra fields or formatting changes are allowed.
     optimized_msgs = msgs
     reconstruction_log = {}
 
     if request.enable_optimization and len(raw_history) > 1 and key_data:
         try:
             user_key_id = v1_key or "anon"
+            # The engine now handles simple reconstruction/splitting
             optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, raw_history)
             if reconstruction_log and "total_history_tokens" in reconstruction_log:
                 original_tokens = reconstruction_log["total_history_tokens"]
