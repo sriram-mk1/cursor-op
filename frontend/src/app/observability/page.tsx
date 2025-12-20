@@ -43,10 +43,12 @@ export default function ObservabilityPage() {
     useEffect(() => {
         const fetchRequests = async () => {
             const { data: { user } } = await supabase.auth.getUser();
-            if (user) {
+            const userId = user?.id || (process.env.NODE_ENV === 'development' ? 'dev-user' : null);
+
+            if (userId) {
                 try {
                     const resp = await fetch(`${GATEWAY_URL}/api/user/stats`, {
-                        headers: { "x-user-id": user.id }
+                        headers: { "x-user-id": userId }
                     });
                     const data = await resp.json();
                     const sorted = (data.recent_requests || []).sort((a: any, b: any) => b.timestamp - a.timestamp);

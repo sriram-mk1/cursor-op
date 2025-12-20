@@ -21,7 +21,11 @@ export function Sidebar() {
 
         const getUser = async () => {
             const { data: { user } } = await supabase.auth.getUser();
-            setUser(user);
+            if (user) {
+                setUser(user);
+            } else if (process.env.NODE_ENV === 'development') {
+                setUser({ email: "dev@localhost", id: "dev-user" });
+            }
         };
         getUser();
     }, [supabase.auth]);

@@ -57,7 +57,9 @@ export async function middleware(request: NextRequest) {
     const { data: { user } } = await supabase.auth.getUser()
 
     // Protect all routes except /login and /auth/callback
-    if (!user && !request.nextUrl.pathname.startsWith('/login') && !request.nextUrl.pathname.startsWith('/auth/callback')) {
+    const isDev = process.env.NODE_ENV === 'development' || process.env.NEXT_PUBLIC_LOCAL_DEV === 'true';
+
+    if (!user && !isDev && !request.nextUrl.pathname.startsWith('/login') && !request.nextUrl.pathname.startsWith('/auth/callback')) {
         return NextResponse.redirect(new URL('/login', request.url))
     }
 

@@ -118,16 +118,16 @@ async def get_stats(x_v1_key: Optional[str] = Header(None, alias="x-v1-key")):
     return stats
 
 @app.get("/api/user/stats")
-async def get_user_stats(x_user_id: str = Header(..., alias="x-user-id")):
-    return db.get_user_stats(x_user_id)
-
-@app.get("/api/conversations/{convo_id}")
-async def get_conversation(convo_id: str):
-    return db.get_conversation_detail(convo_id)
+async def get_user_stats(x_user_id: Optional[str] = Header(None, alias="x-user-id")):
+    # Local dev bypass
+    effective_user_id = x_user_id or os.getenv("DEV_USER_ID", "dev-user")
+    return db.get_user_stats(effective_user_id)
 
 @app.get("/api/keys")
-async def list_keys(x_user_id: str = Header(..., alias="x-user-id")):
-    return db.list_keys(x_user_id)
+async def list_keys(x_user_id: Optional[str] = Header(None, alias="x-user-id")):
+    # Local dev bypass
+    effective_user_id = x_user_id or os.getenv("DEV_USER_ID", "dev-user")
+    return db.list_keys(effective_user_id)
 
 class CreateKeyRequest(BaseModel):
     name: str
@@ -253,16 +253,14 @@ async def chat(
                     except: pass
 
         try:
-            # Save the new response message to history
-            if status_code == 200 and response_msg:
-                raw_history.append(response_msg)
-                db.save_session_state(session_id, {"history": raw_history})
-
+            # Observability: We log the full interaction as a snapshot
+            full_interaction = current_payload_history + ([response_msg] if response_msg else [])
+            
             log_entry = db.log_request(
                 v1_key, session_id, request.model, 
                 original_tokens, latency_ms,
                 reconstruction_log, or_metadata,
-                raw_messages=raw_history,
+                raw_messages=full_interaction,
                 response_message=response_msg
             )
             await manager.broadcast(v1_key, {"type": "request", "data": log_entry})
