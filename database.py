@@ -48,7 +48,7 @@ class Database:
         return None
 
 
-    def log_request(self, api_key_raw: str, session_id: str, model: str, original_tokens: int, latency_ms: float, reconstruction_log: Dict = None, or_metadata: Dict = None):
+    def log_request(self, api_key_raw: str, session_id: str, model: str, original_tokens: int, latency_ms: float, reconstruction_log: Dict = None, or_metadata: Dict = None, raw_messages: List = None, response_message: Dict = None):
         self._check_db()
         hashed = self._hash_key(api_key_raw)
         now = time.time()
@@ -58,6 +58,7 @@ class Database:
             t_in = or_metadata.get("tokens_prompt", 0)
             t_out = or_metadata.get("tokens_completion", 0)
             t_cost = or_metadata.get("total_cost", 0)
+            # V4: Potential total tokens (unoptimized) vs actual tokens used
             t_saved = max(0, original_tokens - t_in)
             
             total_tokens = t_in + t_out
@@ -69,40 +70,31 @@ class Database:
             # 2. Check if a conversation row already exists for this session
             existing = self.supabase.table("analytics").select("*").eq("session_id", session_id).execute()
             
+            analytics_data = {
+                "hashed_key": hashed,
+                "session_id": session_id,
+                "model": model,
+                "tokens_in": t_in,
+                "tokens_out": t_out,
+                "tokens_saved": t_saved,
+                "latency_ms": latency_ms,
+                "cost_saved_usd": float(c_saved),
+                "total_cost_usd": float(t_cost),
+                "reconstruction_log": reconstruction_log or {},
+                "timestamp": now,
+                "or_id": or_metadata.get("id") if or_metadata else None,
+                "raw_messages": raw_messages, # Full observability
+                "response_message": response_message # Full observability
+            }
+
             if existing.data:
-                # Aggregate! (One Row per Conversation)
-                row = existing.data[0]
-                analytics_data = {
-                    "tokens_in": row["tokens_in"] + t_in,
-                    "tokens_out": row["tokens_out"] + t_out,
-                    "tokens_saved": row["tokens_saved"] + t_saved,
-                    "cost_saved_usd": float(row["cost_saved_usd"] or 0) + c_saved,
-                    "total_cost_usd": float(row["total_cost_usd"] or 0) + t_cost,
-                    "latency_ms": latency_ms, # Keep latest latency
-                    "reconstruction_log": reconstruction_log or row["reconstruction_log"],
-                    "timestamp": now,
-                    "or_id": or_metadata.get("id") if or_metadata else row["or_id"]
-                }
-                self.supabase.table("analytics").update(analytics_data).eq("session_id", session_id).execute()
-                res_id = row["id"]
+                # Update existing session record
+                res_id = existing.data[0]["id"]
+                self.supabase.table("analytics").update(analytics_data).eq("id", res_id).execute()
             else:
                 # Create NEW row for this conversation
                 res_id = str(uuid.uuid4())
-                analytics_data = {
-                    "id": res_id,
-                    "hashed_key": hashed,
-                    "session_id": session_id,
-                    "model": model,
-                    "tokens_in": t_in,
-                    "tokens_out": t_out,
-                    "tokens_saved": t_saved,
-                    "latency_ms": latency_ms,
-                    "cost_saved_usd": c_saved,
-                    "total_cost_usd": t_cost,
-                    "reconstruction_log": reconstruction_log or {},
-                    "timestamp": now,
-                    "or_id": or_metadata.get("id") if or_metadata else None
-                }
+                analytics_data["id"] = res_id
                 self.supabase.table("analytics").insert(analytics_data).execute()
 
             # 3. Update global API Key aggregate stats
@@ -125,7 +117,10 @@ class Database:
             "tokens_out": t_out,
             "tokens_saved": t_saved,
             "latency_ms": latency_ms,
-            "timestamp": now
+            "timestamp": now,
+            "cost_saved_usd": c_saved,
+            "total_cost_usd": t_cost,
+            "potential_total": original_tokens
         }
 
     def get_stats(self, api_key_raw: str):
@@ -139,6 +134,27 @@ class Database:
             "total_tokens_saved": key_response.data["total_tokens_saved"],
             "total_requests": key_response.data["total_requests"],
             "recent_requests": recent_response.data
+        }
+
+    def get_user_stats(self, user_id: str):
+        """Aggregate stats for all keys belonging to a user (Dashboard Home)."""
+        self._check_db()
+        # 1. Get all keys for user
+        keys = self.supabase.table("api_keys").select("hashed_key, total_tokens_saved, total_requests").eq("user_id", user_id).execute()
+        if not keys.data:
+            return {"total_tokens_saved": 0, "total_requests": 0, "recent_requests": []}
+        
+        hashes = [k["hashed_key"] for k in keys.data]
+        total_saved = sum(k["total_tokens_saved"] for k in keys.data)
+        total_reqs = sum(k["total_requests"] for k in keys.data)
+        
+        # 2. Get latest requests across ALL keys
+        recent = self.supabase.table("analytics").select("*").in_("hashed_key", hashes).order("timestamp", desc=True).limit(50).execute()
+        
+        return {
+            "total_tokens_saved": total_saved,
+            "total_requests": total_reqs,
+            "recent_requests": recent.data
         }
 
     def create_key(self, name: str, user_id: str, openrouter_key: str = "") -> Dict[str, Any]:
@@ -180,3 +196,32 @@ class Database:
         else:
             hashed = v1_key_or_hash
         self.supabase.table("api_keys").update({"openrouter_key": openrouter_key}).eq("hashed_key", hashed).eq("user_id", user_id).execute()
+
+    def get_session_state(self, session_id: str) -> Optional[Dict[str, Any]]:
+        self._check_db()
+        try:
+            response = self.supabase.table("sessions").select("data").eq("session_id", session_id).single().execute()
+            if response.data:
+                return response.data["data"]
+        except Exception as e:
+            # logger.warning(f"Session lookup failed for {session_id}: {e}")
+            pass
+        return None
+
+    def save_session_state(self, session_id: str, data: Dict[str, Any]):
+        self._check_db()
+        try:
+            # Upsert logic
+            existing = self.supabase.table("sessions").select("id").eq("session_id", session_id).execute()
+            if existing.data:
+                self.supabase.table("sessions").update({"data": data, "updated_at": time.time()}).eq("session_id", session_id).execute()
+            else:
+                self.supabase.table("sessions").insert({
+                    "session_id": session_id,
+                    "data": data,
+                    "created_at": time.time(),
+                    "updated_at": time.time()
+                }).execute()
+        except Exception as e:
+            logger.error(f"Session save failed for {session_id}: {e}")
+            raise e

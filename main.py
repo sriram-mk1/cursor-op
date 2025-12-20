@@ -117,6 +117,10 @@ async def get_stats(x_v1_key: Optional[str] = Header(None, alias="x-v1-key")):
         raise HTTPException(status_code=401, detail="Invalid V1 API Key")
     return stats
 
+@app.get("/api/user/stats")
+async def get_user_stats(x_user_id: str = Header(..., alias="x-user-id")):
+    return db.get_user_stats(x_user_id)
+
 @app.get("/api/keys")
 async def list_keys(x_user_id: str = Header(..., alias="x-user-id")):
     return db.list_keys(x_user_id)
@@ -156,9 +160,8 @@ async def websocket_endpoint(websocket: WebSocket, api_key: str):
     
     await manager.connect(websocket, api_key)
     try:
-        # Send initial stats
+        # Initial stats
         stats = db.get_stats(api_key)
-        log.info(f"Sending initial stats to {api_key[:8]}...")
         await websocket.send_json({"type": "init", "data": stats})
         while True:
             await websocket.receive_text() # Keep alive
@@ -179,183 +182,143 @@ async def chat(
     x_session_id: Optional[str] = Header(None, alias="x-session-id"),
 ):
     start_time = time.time()
-    # 1. Resolve OpenRouter Key (Primary)
-    # Priority: 
-    # 1. api_key in payload
-    # 2. Authorization header (if it's a real OR key, not a V1 key)
-    # 3. Environment variable OPENROUTER_API_KEY
+    # 1. Resolve Keys
     or_key = request.api_key
-    
     if not or_key and authorization and "v1-" not in authorization:
         or_key = authorization.replace("Bearer ", "").strip()
-    
     if not or_key or or_key.strip() == "":
         or_key = os.getenv("OPENROUTER_API_KEY")
-    
     if not or_key:
-        raise HTTPException(status_code=401, detail="Missing OpenRouter API Key. Please provide it in the Authorization header.")
+        raise HTTPException(status_code=401, detail="Missing OpenRouter API Key")
 
-    # 2. Resolve V1 Key for Tracking (Optional)
     v1_key = x_v1_key or (authorization.replace("Bearer ", "").strip() if authorization and "v1-" in authorization else None)
     key_data = db.validate_key(v1_key) if v1_key else None
 
-    # 3. Determine Session ID (Smart Fingerprinting for External Editors)
+    # 2. Session Tracking & History Sync
     session_id = request.session_id or x_session_id
-    
     msgs = request.messages or []
     if request.prompt and not msgs:
         msgs = [{"role": "user", "content": request.prompt}]
 
     if not session_id and msgs:
-        # Create a stable fingerprint from the first message AND the user's key
         key_id = v1_key[:8] if v1_key else "anon"
-        
-        # V3.6 Denoised Fingerprinting: 
-        # We strip the environment garbage BEFORE hashing so the session is "sticky"
-        # regardless of timestamp/cost drift in the boilerplate.
         first_content = str(msgs[0].get("content", ""))
-        # Simple extraction of the actual task/user input
-        task_match = re.search(r"<task>(.*?)</task>", first_content, re.DOTALL | re.IGNORECASE)
-        core_msg = task_match.group(1).strip() if task_match else first_content[:500]
-        
-        # Salt with the user's key for 100% isolation
-        fingerprint = hashlib.md5(f"{key_id}:{core_msg}".encode()).hexdigest()[:12]
-        session_id = f"t_{key_id}_{fingerprint}"
-        log.info(f"🧩 Stable Fingerprint: {session_id} (Denoised)")
-    elif session_id:
-        log.info(f"📌 Using provided session: {session_id}")
+        fingerprint = hashlib.md5(f"{key_id}:{first_content[:500]}".encode()).hexdigest()[:12]
+        session_id = f"s_{key_id}_{fingerprint}"
+
+    # --- Ghost Session Logic (Supabase Powered) ---
+    # We maintain the "True History" in Supabase to understand context growth
+    db_state = db.get_session_state(session_id) or {"history": []}
+    raw_history = db_state["history"]
     
-    if not session_id:
-        # Final fallback for purely stateless calls without conversation prefix
-        session_id = f"s_{v1_key[:8]}" if v1_key else "global_stateless"
-        log.info(f"⚡️ Using fallback: {session_id}")
+    # Sync new turns
+    if msgs:
+        if not raw_history or msgs[0].get("content") != raw_history[0].get("content"):
+            raw_history = msgs
+        else:
+            # Sync only new turns
+            if len(msgs) > len(raw_history):
+                for m in msgs[len(raw_history):]:
+                    raw_history.append(m)
     
-    original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in msgs)
+    original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in raw_history)
     
-    # 4. V1 Pipeline: Optimize Context (if enabled)
+    # 3. Context Window Discovery (Observability Phase)
+    # We pass the full raw_history to the optimizer, but it might just be 
+    # logging for now if optimization is disabled.
     optimized_msgs = msgs
     reconstruction_log = {}
 
-    if request.enable_optimization and len(msgs) > 1 and key_data:
+    if request.enable_optimization and len(raw_history) > 1 and key_data:
         try:
-            # Use v1_key for strict isolation
             user_key_id = v1_key or "anon"
-            log.info(f"🚀 [V3.3] Optimizing {session_id} for user {user_key_id[:8]}")
-            optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, msgs)
-            
-            # V3.9: Correct the 'total' tokens to include the full cached history
+            optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, raw_history)
             if reconstruction_log and "total_history_tokens" in reconstruction_log:
                 original_tokens = reconstruction_log["total_history_tokens"]
-                
-            log.info(f"✅ [V3.9] Optimized | {reconstruction_log.get('selected_lines')} / {reconstruction_log.get('total_lines')} lines kept ({original_tokens} potential tokens)")
         except Exception as e:
-            log.error(f"V1 Pipeline Error: {e}")
+            log.error(f"Optimization Error: {e}")
 
-    optimized_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in optimized_msgs)
-    tokens_saved = max(0, original_tokens - optimized_tokens)
-
-    # 4. Forward to OpenRouter
+    # 4. Forward
     payload = request.model_dump(exclude_none=True)
-    payload.pop("enable_optimization", None)
-    payload.pop("session_id", None)
-    payload.pop("api_key", None)
-    payload.pop("debug", None)
+    for k in ["enable_optimization", "session_id", "api_key", "debug", "prompt"]:
+        payload.pop(k, None)
     payload["messages"] = optimized_msgs
-    if "prompt" in payload: payload.pop("prompt")
 
     headers = {"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"}
 
-    async def fetch_or_metadata(generation_id: str, or_key: str, max_retries=3):
-        """Fetch accurate usage and cost from OpenRouter with retries."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for i in range(max_retries):
-                try:
-                    # Give OpenRouter a moment to populate the data
-                    await asyncio.sleep(1.5 * (i + 1)) 
-                    
-                    resp = await client.get(
-                        OPENROUTER_GEN_URL,
-                        params={"id": generation_id},
-                        headers={"Authorization": f"Bearer {or_key}"}
-                    )
-                    
-                    if resp.status_code == 200:
-                        data = resp.json().get("data")
-                        if data and data.get("tokens_prompt"):
-                            return data
-                    
-                    log.warning(f"Retry {i+1} for generation {generation_id}: {resp.status_code}")
-                except Exception as e:
-                    log.error(f"Error fetching OR metadata: {e}")
-        return None
-
-    async def log_and_broadcast(gen_id: str, or_key: str, status_code: int, latency_ms: float):
-        if not key_data or not v1_key:
-            log.warning("Skipping broadcast: No key data or V1 key")
-            return
-            
-        # Fetch accurate data from OpenRouter
+    async def log_and_broadcast(gen_id: str, status_code: int, latency_ms: float, response_msg: Dict = None):
+        if not v1_key: return
+        
+        # Async Metadata
         or_metadata = None
         if gen_id and status_code == 200:
-            or_metadata = await fetch_or_metadata(gen_id, or_key)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for i in range(3):
+                    await asyncio.sleep(1.5 * (i + 1))
+                    try:
+                        resp = await client.get(OPENROUTER_GEN_URL, params={"id": gen_id}, headers={"Authorization": f"Bearer {or_key}"})
+                        if resp.status_code == 200:
+                            or_metadata = resp.json().get("data")
+                            if or_metadata and or_metadata.get("tokens_prompt"): break
+                    except: pass
 
         try:
-            log.info(f"Logging request for {v1_key[:8]}... Status: {status_code} Latency: {latency_ms:.1f}ms")
+            # Save the new response message to history
+            if status_code == 200 and response_msg:
+                raw_history.append(response_msg)
+                db.save_session_state(session_id, {"history": raw_history})
+
             log_entry = db.log_request(
                 v1_key, session_id, request.model, 
                 original_tokens, latency_ms,
-                reconstruction_log,
-                or_metadata=or_metadata
+                reconstruction_log, or_metadata,
+                raw_messages=raw_history,
+                response_message=response_msg
             )
-            log.info(f"Broadcasting log entry to {v1_key[:8]}...")
             await manager.broadcast(v1_key, {"type": "request", "data": log_entry})
         except Exception as e:
-            log.error(f"Logging Error: {e}")
+            log.error(f"Log Task Error: {e}")
 
-    try:
-        if request.stream:
-            async def stream_gen():
-                async with httpx.AsyncClient(timeout=120.0) as client:
-                    async with client.stream("POST", f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers) as resp:
-                        if resp.status_code != 200:
-                            # Forward high-level error if OR fails early
-                            error_text = await resp.aread()
-                            log.error(f"Upstream Stream Error {resp.status_code}: {error_text}")
-                            yield f"data: {json.dumps({'error': {'message': f'OpenRouter Error {resp.status_code}', 'type': 'upstream_error'}})}\n\n".encode()
-                            return
-
-                        gen_id = None
-                        async for chunk in resp.aiter_bytes():
-                            if not gen_id and chunk.startswith(b"data: "):
-                                try:
-                                    content = chunk.decode('utf-8').replace('data: ', '').strip()
-                                    if content != '[DONE]':
-                                        chunk_data = json.loads(content)
-                                        gen_id = chunk_data.get("id")
-                                except: pass
-                            yield chunk
-                        
-                        finish_latency = (time.time() - start_time) * 1000
-                        background_tasks.add_task(log_and_broadcast, gen_id, or_key, 200, finish_latency)
-
-            return StreamingResponse(stream_gen(), media_type="text/event-stream")
-        else:
+    if request.stream:
+        async def stream_gen():
             async with httpx.AsyncClient(timeout=120.0) as client:
-                try:
-                    resp = await client.post(f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers)
-                    resp_json = resp.json()
-                    gen_id = resp_json.get("id")
-                    finish_latency = (time.time() - start_time) * 1000
-                    background_tasks.add_task(log_and_broadcast, gen_id, or_key, resp.status_code, finish_latency)
-                    return JSONResponse(content=resp_json, status_code=resp.status_code)
-                except Exception as e:
-                    log.error(f"Post Error: {e}")
-                    finish_latency = (time.time() - start_time) * 1000
-                    background_tasks.add_task(log_and_broadcast, None, or_key, 500, finish_latency)
-                    raise e
-    except Exception as e:
-        log.error(f"Forward Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+                async with client.stream("POST", f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers) as resp:
+                    if resp.status_code != 200:
+                        yield f"data: {json.dumps({'error': {'message': 'OpenRouter Error'}})}\n\n".encode()
+                        return
+                    
+                    full_content = ""
+                    gen_id = None
+                    async for chunk in resp.aiter_lines():
+                        if not chunk: continue
+                        yield (chunk + "\n").encode()
+                        if chunk.startswith("data: "):
+                            content = chunk[6:].strip()
+                            if content == "[DONE]": continue
+                            try:
+                                d = json.loads(content)
+                                if not gen_id: gen_id = d.get("id")
+                                delta = d.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                full_content += delta
+                            except: pass
+                    
+                    background_tasks.add_task(log_and_broadcast, gen_id, 200, (time.time() - start_time) * 1000, {"role": "assistant", "content": full_content})
+        return StreamingResponse(stream_gen(), media_type="text/event-stream")
+    else:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(f"{OPENROUTER_API_BASE}/chat/completions", json=payload, headers=headers)
+            resp_json = resp.json()
+            resp_msg = resp_json.get("choices", [{}])[0].get("message")
+            background_tasks.add_task(log_and_broadcast, resp_json.get("id"), resp.status_code, (time.time() - start_time) * 1000, resp_msg)
+            return JSONResponse(content=resp_json, status_code=resp.status_code)
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "uptime": int(time.time() - app.state.start_time)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
 @app.get("/health")
 async def health():

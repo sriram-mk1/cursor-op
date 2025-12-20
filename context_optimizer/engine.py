@@ -1,6 +1,6 @@
 import os
 import json
-import redis
+
 import re
 import logging
 import hashlib
@@ -174,55 +174,39 @@ class ContextOptimizer:
         self.base_budget = 1800
         self.session_ttl = 86400 # 24 Hours
         
-        # Redis Setup: Smart detection with strict timeouts
-        redis_url = os.getenv("REDIS_URL") or os.getenv("REDISURL") or os.getenv("REDISHOST")
-        if redis_url and not redis_url.startswith("redis"):
-            redis_url = f"redis://{redis_url}"
-            
-        if redis_url:
-            try:
-                # Add strict timeouts to prevent hanging on cold starts or network issues
-                self.redis = redis.from_url(
-                    redis_url, 
-                    decode_responses=True,
-                    socket_timeout=3.0,
-                    socket_connect_timeout=3.0,
-                    retry_on_timeout=False
-                )
-                # Verify connection immediately
-                self.redis.ping()
-                log.info(f"📡 [V3 RAG] Connected to Redis KV Cache")
-            except Exception as e:
-                log.error(f"❌ Redis connection failed (falling back to RAM): {e}")
-                self.redis = None
-        else:
-            self.redis = None
-            log.warning("🏠 [V3 RAG] No REDIS_URL found, using local RAM storage")
-            
+        # Persistence: Use Database class directly
+        from database import Database
+        self.db = Database()
         self.local_sessions: Dict[str, Dict[str, Any]] = {}
 
     def _get_session(self, user_key: str, session_id: str) -> Dict[str, Any]:
-        """Strictly isolated session retrieval."""
+        """Strictly isolated session retrieval from Supabase."""
+        # storage_key no longer needed for internal dict lookup if we use DB, 
+        # but useful for local fallback
         storage_key = f"v3:{hashlib.md5(user_key.encode()).hexdigest()[:10]}:{session_id}"
-        if self.redis:
-            data = self.redis.get(storage_key)
+        
+        # Try DB first
+        if self.db and self.db.supabase:
+            data = self.db.get_session_state(session_id)
             if data:
-                raw = json.loads(data)
                 return {
-                    "history": raw.get("history", []),
-                    "atoms": [Atom.from_dict(a) for a in raw.get("atoms", [])]
+                    "history": data.get("history", []),
+                    "atoms": [Atom.from_dict(a) for a in data.get("atoms", [])]
                 }
+        
         return self.local_sessions.get(storage_key, {"history": [], "atoms": []})
 
     def _save_session(self, user_key: str, session_id: str, history: List, atoms: List):
-        """Strictly isolated session persistence."""
+        """Strictly isolated session persistence to Supabase."""
         storage_key = f"v3:{hashlib.md5(user_key.encode()).hexdigest()[:10]}:{session_id}"
         data = {
             "history": history,
             "atoms": [a.to_dict() for a in atoms]
         }
-        if self.redis:
-            self.redis.setex(storage_key, self.session_ttl, json.dumps(data))
+        
+        # Save to DB
+        if self.db and self.db.supabase:
+            self.db.save_session_state(session_id, data)
         else:
             self.local_sessions[storage_key] = {"history": history, "atoms": atoms}
 
