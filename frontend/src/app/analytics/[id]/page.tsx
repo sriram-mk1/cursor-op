@@ -15,6 +15,19 @@ export default function RequestDetailPage() {
     const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000";
     const supabase = createClient();
 
+    const renderContent = (content: any) => {
+        if (typeof content === 'string') return content;
+        if (Array.isArray(content)) {
+            return content.map((c, i) => (
+                <span key={i}>{typeof c === 'string' ? c : (c.text || JSON.stringify(c))}</span>
+            ));
+        }
+        if (typeof content === 'object' && content !== null) {
+            return content.text || JSON.stringify(content);
+        }
+        return String(content || "");
+    };
+
     useEffect(() => {
         const fetchDetail = async () => {
             // Since we don't have a direct endpoint yet, we fetch from Supabase
@@ -100,7 +113,7 @@ export default function RequestDetailPage() {
                                             {msg.role}
                                         </div>
                                         <div style={{ fontSize: "13px", lineHeight: "1.6", whiteSpace: "pre-wrap", color: "rgba(255,255,255,0.8)" }}>
-                                            {msg.content}
+                                            {renderContent(msg.content)}
                                         </div>
                                     </div>
                                 ))}
@@ -110,7 +123,7 @@ export default function RequestDetailPage() {
                                             ASSISTANT (RESPONSE)
                                         </div>
                                         <div style={{ fontSize: "13px", lineHeight: "1.6", whiteSpace: "pre-wrap", color: "rgba(255,255,255,0.9)" }}>
-                                            {log.response_message.content}
+                                            {renderContent(log.response_message.content)}
                                         </div>
                                     </div>
                                 )}
