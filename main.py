@@ -182,17 +182,27 @@ async def chat(
     x_session_id: Optional[str] = Header(None, alias="x-session-id"),
 ):
     start_time = time.time()
-    # 1. Resolve Keys
-    or_key = request.api_key
-    if not or_key and authorization and "v1-" not in authorization:
-        or_key = authorization.replace("Bearer ", "").strip()
-    if not or_key or or_key.strip() == "":
-        or_key = os.getenv("OPENROUTER_API_KEY")
-    if not or_key:
-        raise HTTPException(status_code=401, detail="Missing OpenRouter API Key")
-
+    # 1. Resolve V1 Gateway Key
     v1_key = x_v1_key or (authorization.replace("Bearer ", "").strip() if authorization and "v1-" in authorization else None)
     key_data = db.validate_key(v1_key) if v1_key else None
+
+    # 2. Resolve OpenRouter API Key
+    or_key = request.api_key # Priority 1: Payload
+    
+    # Priority 2: Authorization Header (if it's a standard SK key)
+    if not or_key and authorization and "v1-" not in authorization:
+        or_key = authorization.replace("Bearer ", "").strip()
+    
+    # Priority 3: Associated Provider Key from Database
+    if not or_key and key_data and key_data.get("openrouter_key"):
+        or_key = key_data.get("openrouter_key")
+        
+    # Priority 4: Environment Fallback
+    if not or_key or or_key.strip() == "":
+        or_key = os.getenv("OPENROUTER_API_KEY")
+
+    if not or_key:
+        raise HTTPException(status_code=401, detail="Missing OpenRouter API Key. Provide it in payload, Authorization header, or link it to your V1 key in the dashboard.")
 
     # 2. Session Tracking & History Sync
     session_id = request.session_id or x_session_id
