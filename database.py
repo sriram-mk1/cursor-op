@@ -66,6 +66,7 @@ class Database:
 
         try:
             analytics_data = {
+                "id": str(uuid.uuid4()),
                 "hashed_key": hashed,
                 "session_id": session_id,
                 "model": model,
@@ -78,13 +79,10 @@ class Database:
                 "reconstruction_log": reconstruction_log or {},
                 "timestamp": now,
                 "or_id": or_metadata.get("id") if or_metadata else None,
-                "metadata": or_metadata,
                 "raw_messages": raw_messages,
                 "response_message": response_message,
-                "reconstruction_snapshot": reconstruction_snapshot
+                "optimized_prompt": reconstruction_snapshot
             }
-            res_id = str(uuid.uuid4())
-            analytics_data["id"] = res_id
             self.supabase.table("analytics").insert(analytics_data).execute()
 
             # 3. Update global API Key aggregate stats
