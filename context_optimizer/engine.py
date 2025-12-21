@@ -104,7 +104,7 @@ class ContextOptimizer:
         scored_atoms = self.reconstructor.score_atoms(atoms, query)
         
         # 4. Select top atoms from history
-        top_atoms = sorted(scored_atoms, key=lambda x: x.score, reverse=True)[:50]
+        top_atoms = sorted(scored_atoms, key=lambda x: x.score, reverse=True)[:20]
         selected_indices = set()
         for atom in top_atoms:
             # Keep neighbors for flow
