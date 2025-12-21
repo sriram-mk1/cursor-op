@@ -78,6 +78,7 @@ class Database:
                 "reconstruction_log": reconstruction_log or {},
                 "timestamp": now,
                 "or_id": or_metadata.get("id") if or_metadata else None,
+                "metadata": or_metadata,
                 "raw_messages": raw_messages,
                 "response_message": response_message
             }

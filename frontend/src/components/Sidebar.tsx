@@ -47,7 +47,6 @@ export function Sidebar() {
         { icon: LayoutDashboard, label: "Overview", href: "/" },
         { icon: Key, label: "API Keys", href: "/keys" },
         { icon: BarChart3, label: "Analytics", href: "/analytics" },
-        { icon: Zap, label: "Deep Observability", href: "/observability" },
         { icon: Settings, label: "Settings", href: "/settings" },
     ];
 

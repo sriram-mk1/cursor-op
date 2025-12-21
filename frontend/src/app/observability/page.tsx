@@ -3,38 +3,25 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-    ChevronDown, ArrowRight, Clock,
-    Sparkles, Layout, Search, Zap, Code
+    ArrowRight, Search, Zap, Clock, Code, Activity, ChevronRight, Plus
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { createClient } from "@/utils/supabase";
 
-// --- Types ---
 interface AnalyticsRow {
     id: string;
     model: string;
     tokens_in: number;
-    tokens_out: number;
     tokens_saved: number;
     latency_ms: number;
     timestamp: number;
-    raw_messages: any[];
-    response_message: any;
-    reconstruction_log: {
-        sequence: Array<{
-            source: string;
-            text: string;
-            score: number;
-            line_index: number;
-        }>;
-    };
 }
 
-export default function ObservabilityPage() {
+export default function ObservabilityListPage() {
     const router = useRouter();
     const [requests, setRequests] = useState<AnalyticsRow[]>([]);
-    const [selectedRequest, setSelectedRequest] = useState<AnalyticsRow | null>(null);
+    const [displayLimit, setDisplayLimit] = useState(10);
     const [loading, setLoading] = useState(true);
 
     const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000";
@@ -51,9 +38,19 @@ export default function ObservabilityPage() {
                         headers: { "x-user-id": userId }
                     });
                     const data = await resp.json();
-                    const sorted = (data.recent_requests || []).sort((a: any, b: any) => b.timestamp - a.timestamp);
-                    setRequests(sorted);
-                    if (sorted.length > 0) setSelectedRequest(sorted[0]);
+                    const fetched = (data.recent_requests || []);
+
+                    if (fetched.length === 0 && process.env.NODE_ENV === 'development') {
+                        // Inject Mock Requests for Local Test
+                        setRequests([
+                            { id: 'mock-1', model: 'anthropic/claude-3-sonnet', tokens_in: 5200, tokens_saved: 4100, latency_ms: 1840, timestamp: Date.now() / 1000 - 3600 },
+                            { id: 'mock-2', model: 'openai/gpt-4-turbo', tokens_in: 8400, tokens_saved: 6200, latency_ms: 3200, timestamp: Date.now() / 1000 - 7200 },
+                            { id: 'mock-3', model: 'meta-llama/llama-3-70b', tokens_in: 2100, tokens_saved: 1500, latency_ms: 950, timestamp: Date.now() / 1000 - 10800 },
+                            { id: 'mock-4', model: 'google/gemini-pro-1.5', tokens_in: 12500, tokens_saved: 9800, latency_ms: 4500, timestamp: Date.now() / 1000 - 14400 },
+                        ]);
+                    } else {
+                        setRequests(fetched.sort((a: any, b: any) => b.timestamp - a.timestamp));
+                    }
                 } catch (e) {
                     console.error("Failed to fetch requests", e);
                 }
@@ -61,172 +58,103 @@ export default function ObservabilityPage() {
             }
         };
         fetchRequests();
-    }, [supabase.auth]);
+    }, [supabase.auth, GATEWAY_URL]);
+
+    const loadMore = () => setDisplayLimit(prev => prev + 10);
 
     return (
         <div className="layout-wrapper">
             <Sidebar />
             <main className="main-content">
 
-                {/* Header - Matching Analytics Style */}
-                <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "48px" }}>
-                    <div>
-                        <h1 style={{ fontSize: "24px", fontWeight: 600 }}>Deep Observability</h1>
-                        <p className="text-muted" style={{ fontSize: "13px", marginTop: "4px" }}>Analyze context reconstruction and token efficiency per request.</p>
-                    </div>
-
-                    {/* Request Selection Dropdown - Styled like selection buttons */}
-                    <div style={{ position: 'relative', minWidth: '320px' }}>
-                        <select
-                            value={selectedRequest?.id || ""}
-                            onChange={(e) => setSelectedRequest(requests.find(r => r.id === e.target.value) || null)}
-                            className="glass"
-                            style={{
-                                width: '100%',
-                                appearance: 'none',
-                                padding: '12px 16px',
-                                borderRadius: '8px',
-                                fontSize: '12px',
-                                fontWeight: 600,
-                                color: 'var(--fg)',
-                                border: '1px solid rgba(255,255,255,0.05)',
-                                cursor: 'pointer',
-                                background: 'rgba(255,255,255,0.02)',
-                                outline: 'none'
-                            }}
-                        >
-                            {requests.map((r) => (
-                                <option key={r.id} value={r.id}>
-                                    {new Date(r.timestamp * 1000).toLocaleString()} • {r.model.split('/').pop()}
-                                </option>
-                            ))}
-                            {requests.length === 0 && <option value="" disabled>No requests available</option>}
-                        </select>
-                        <ChevronDown style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', opacity: 0.3, pointerEvents: 'none' }} size={14} />
-                    </div>
+                <header style={{ marginBottom: "48px" }}>
+                    <h1 style={{ fontSize: "24px", fontWeight: 700, letterSpacing: '-0.03em' }}>Deep Observability</h1>
+                    <p className="text-muted" style={{ fontSize: "14px", marginTop: "4px" }}>Select a request to step into the reconstruction observer.</p>
                 </header>
 
-                <AnimatePresence mode="wait">
-                    {selectedRequest ? (
-                        <motion.div
-                            key={selectedRequest.id}
-                            initial={{ opacity: 0, y: 10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -10 }}
-                            transition={{ duration: 0.2 }}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1000px' }}>
+                    <AnimatePresence>
+                        {requests.slice(0, displayLimit).map((req, idx) => (
+                            <motion.div
+                                key={req.id}
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ delay: idx * 0.03 }}
+                                onClick={() => router.push(`/analytics/${req.id}`)}
+                                className="glass card"
+                                style={{
+                                    padding: '20px 24px',
+                                    display: 'grid',
+                                    gridTemplateColumns: '1fr 1fr 1fr 1fr 40px',
+                                    alignItems: 'center',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+                                    border: '1px solid rgba(255,255,255,0.05)'
+                                }}
+                                whileHover={{ scale: 1.005, borderColor: 'var(--accent)', background: 'rgba(255,255,255,0.03)' }}
+                            >
+                                <div>
+                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>TIMESTAMP</div>
+                                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{new Date(req.timestamp * 1000).toLocaleString()}</div>
+                                </div>
+
+                                <div>
+                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>MODEL</div>
+                                    <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--accent)' }}>{req.model.split('/').pop()}</div>
+                                </div>
+
+                                <div>
+                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>OPTIMIZATION</div>
+                                    <div style={{ fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        <Zap size={12} className="text-accent" />
+                                        <span>{((req.tokens_saved / (req.tokens_in + req.tokens_saved || 1)) * 100).toFixed(1)}%</span>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>LATENCY</div>
+                                    <div style={{ fontSize: '13px', opacity: 0.8 }}>{req.latency_ms.toFixed(0)}ms</div>
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', opacity: 0.2 }}>
+                                    <ChevronRight size={18} />
+                                </div>
+                            </motion.div>
+                        ))}
+                    </AnimatePresence>
+
+                    {requests.length > displayLimit && (
+                        <motion.button
+                            onClick={loadMore}
+                            whileHover={{ scale: 1.02, background: 'rgba(255,255,255,0.08)' }}
+                            className="glass"
+                            style={{
+                                marginTop: '12px',
+                                padding: '16px',
+                                borderRadius: '16px',
+                                border: '1px dashed rgba(255,255,255,0.1)',
+                                color: 'rgba(255,255,255,0.4)',
+                                fontSize: '13px',
+                                fontWeight: 600,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '8px',
+                                cursor: 'pointer'
+                            }}
                         >
-                            {/* Main Bento Grid */}
-                            <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: "32px", marginBottom: "32px" }}>
+                            <Plus size={14} /> Load 10 More Requests
+                        </motion.button>
+                    )}
 
-                                {/* Visual Sequence Card */}
-                                <div className="glass card" style={{ padding: '32px' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '32px' }}>
-                                        <div>
-                                            <h3 style={{ fontSize: "12px", fontWeight: 800, color: "var(--muted)", textTransform: 'uppercase', letterSpacing: '0.05em' }}>Reconstruction Flow</h3>
-                                            <div style={{ fontSize: "24px", fontWeight: 500, marginTop: "8px" }}>
-                                                {selectedRequest.reconstruction_log?.sequence?.length || 0} <span style={{ opacity: 0.3, fontSize: '14px' }}>Active Chunks</span>
-                                            </div>
-                                        </div>
-                                        <div className="savings-badge">
-                                            <Zap size={12} /> {((selectedRequest.tokens_saved / (selectedRequest.tokens_in + selectedRequest.tokens_saved || 1)) * 100).toFixed(1)}% Optimized
-                                        </div>
-                                    </div>
-
-                                    {/* Sequence Preview List */}
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                        {selectedRequest.reconstruction_log?.sequence?.slice(0, 5).map((item, i) => (
-                                            <div key={i} className="glass" style={{ padding: '16px', borderRadius: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                                    <div style={{
-                                                        width: '32px',
-                                                        height: '32px',
-                                                        borderRadius: '8px',
-                                                        background: item.score > 0.5 ? 'var(--accent-muted)' : 'rgba(255,255,255,0.02)',
-                                                        display: 'flex',
-                                                        alignItems: 'center',
-                                                        justifyContent: 'center',
-                                                        fontSize: '10px',
-                                                        fontWeight: 800,
-                                                        color: item.score > 0.5 ? 'var(--accent)' : 'rgba(255,255,255,0.2)'
-                                                    }}>
-                                                        {(item.score * 100).toFixed(0)}%
-                                                    </div>
-                                                    <span style={{ fontSize: '13px', opacity: 0.8, fontFamily: 'monospace', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                        {item.text}
-                                                    </span>
-                                                </div>
-                                                <span style={{ fontSize: '10px', opacity: 0.2 }}>LINE {item.line_index}</span>
-                                            </div>
-                                        ))}
-                                        {(!selectedRequest.reconstruction_log?.sequence || selectedRequest.reconstruction_log.sequence.length === 0) && (
-                                            <div style={{ textAlign: 'center', padding: '40px', opacity: 0.3, fontSize: '13px' }}>No reconstruction log available for this request.</div>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* Performance Stats Column */}
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                                    <div className="glass card stat-item" style={{ background: "var(--accent-muted)", borderColor: "var(--accent)" }}>
-                                        <div className="stat-label" style={{ color: "var(--accent)" }}>Tokens Distilled</div>
-                                        <div className="stat-value" style={{ color: "var(--accent)" }}>{selectedRequest.tokens_saved.toLocaleString()}</div>
-                                        <div style={{ fontSize: "11px", opacity: 0.6 }}>Bypassed via reconstruction</div>
-                                    </div>
-                                    <div className="glass card stat-item">
-                                        <div className="stat-label">Execution Latency</div>
-                                        <div className="stat-value">{selectedRequest.latency_ms.toFixed(0)} <span style={{ fontSize: "14px", opacity: 0.4 }}>ms</span></div>
-                                    </div>
-                                    <div className="glass card stat-item">
-                                        <div className="stat-label">Input Payload</div>
-                                        <div className="stat-value">{selectedRequest.tokens_in.toLocaleString()} <span style={{ fontSize: "14px", opacity: 0.4 }}>tokens</span></div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Bottom Row - Preview & Entry */}
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "32px" }}>
-                                <div className="glass card">
-                                    <h3 style={{ fontSize: "14px", fontWeight: 600, marginBottom: "24px" }}>Prompt Context</h3>
-                                    <div style={{ fontSize: '13px', opacity: 0.6, background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', minHeight: '120px' }}>
-                                        {selectedRequest.raw_messages?.slice(-1)[0]?.content?.toString().slice(0, 400)}...
-                                    </div>
-                                </div>
-
-                                <div className="glass card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '20px', textAlign: 'center' }}>
-                                    <div style={{ width: '64px', height: '64px', borderRadius: '20px', background: 'var(--accent-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                                        <Layout className="text-accent" size={32} />
-                                    </div>
-                                    <div>
-                                        <h4 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '4px' }}>Analyze Complete Flow</h4>
-                                        <p style={{ fontSize: '13px', opacity: 0.4 }}>Step through the full animation of how this context was built.</p>
-                                    </div>
-                                    <button
-                                        onClick={() => router.push(`/analytics/${selectedRequest.id}`)}
-                                        className="btn btn-primary"
-                                        style={{ width: '100%', height: '56px', borderRadius: '16px', fontSize: '15px', fontWeight: 700 }}
-                                    >
-                                        Enter Observer Mode <ArrowRight size={18} />
-                                    </button>
-                                </div>
-                            </div>
-
-                        </motion.div>
-                    ) : !loading && (
-                        <div style={{ textAlign: "center", padding: "100px 0", opacity: 0.2 }}>
-                            <Search size={48} style={{ margin: "0 auto 16px" }} />
-                            <p>No requests found in account</p>
+                    {!loading && requests.length === 0 && (
+                        <div style={{ textAlign: 'center', padding: '100px 0', opacity: 0.2 }}>
+                            <Search size={48} style={{ margin: '0 auto 16px' }} />
+                            <p>No optimization trails found yet.</p>
                         </div>
                     )}
-                </AnimatePresence>
-
+                </div>
             </main>
-
-            <style jsx global>{`
-        select option {
-          background: #0d0d0d !important;
-          color: #fff !important;
-          padding: 12px !important;
-        }
-      `}</style>
         </div>
     );
 }

@@ -140,11 +140,13 @@ class ContextOptimizer:
             "overhead_ms": (time.time() - start_time) * 1000,
             "sequence": [
                 {
+                    "id": f"atom-{a.line_index}",
                     "source": a.source,
                     "text": a.text,
                     "score": round(a.score, 3),
-                    "line_index": a.line_index
+                    "line_index": a.line_index,
+                    "selected": a.line_index in selected_indices
                 }
-                for a in reconstructed_atoms
+                for a in scored_atoms[:100]  # Return top 100 for visualization
             ]
         }
