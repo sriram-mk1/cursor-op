@@ -147,11 +147,11 @@ class RemoteOptimizer:
         # [System] + [Optimized History] + [Query]
         optimized = system_msgs + optimized_history + [query_msg]
         
-        # Prepare Metadata
-        snapshot_preview = "\n\n".join([f"[{m['role'].upper()}]: {m['content'][:200]}..." for m in optimized_history])
+        # Prepare Metadata (Full snapshot for dashboard)
+        snapshot_text = "\n\n".join([f"[{m['role'].upper()}]: {m['content']}" for m in optimized_history])
 
         return optimized, {
-            "snapshot": snapshot_preview,
+            "snapshot": snapshot_text,
             "log": {
                 "total_chunks": len(chunks),
                 "selected_chunks": len(selected_indices),
