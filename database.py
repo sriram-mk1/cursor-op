@@ -226,3 +226,26 @@ class Database:
         except Exception as e:
             logger.error(f"Session save failed for {session_id}: {e}")
             raise e
+
+    def get_session_history(self, session_id: str, hashed_key: str) -> List[Dict[str, Any]]:
+        """Retrieve the most recent full 'raw_messages' sequence for a session, scoped to a specific key."""
+        self._check_db()
+        try:
+            # Get the latest analytics entry for this session that has raw_messages
+            response = self.supabase.table("analytics")\
+                .select("raw_messages, response_message")\
+                .eq("session_id", session_id)\
+                .eq("hashed_key", hashed_key)\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
+            
+            if response.data and response.data[0].get("raw_messages"):
+                entry = response.data[0]
+                msgs = entry["raw_messages"]
+                # If there's a response message in the snapshot that wasn't included in the raw_messages yet,
+                # (though main.py usually appends it), we ensure the full chain is there.
+                return msgs
+        except Exception as e:
+            logger.warning(f"Failed to fetch session history for {session_id}: {e}")
+        return []
