@@ -43,7 +43,7 @@ class ContextOptimizer:
                 response = client.post(self.modal_url, json=payload)
                 if response.status_code == 200:
                     data = response.json()
-                    # Expecting [optimized_messages, log_metadata]
+                    # Expecting [optimized_messages, {log: {}, snapshot: ""}]
                     return data[0], data[1]
                 else:
                     log.error(f"Modal Error ({response.status_code}): {response.text}")

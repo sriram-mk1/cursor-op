@@ -108,6 +108,15 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None # Explicit session ID
     api_key: Optional[str] = None # Support key in payload
 
+def generate_conversation_fingerprint(v1_key: str, messages: List[Dict]) -> str:
+    """Generates a unique ID for a thread based on its first message + user key."""
+    if not messages: return "default"
+    # Find the first user message
+    first_msg = next((m for m in messages if m.get("role") == "user"), messages[0])
+    # Hash of v1_key + first message content ensures isolation
+    seed = f"{v1_key}:{json.dumps(first_msg, sort_keys=True)}"
+    return hashlib.sha256(seed.encode()).hexdigest()[:16]
+
 @app.get("/api/stats")
 async def get_stats(x_v1_key: Optional[str] = Header(None, alias="x-v1-key")):
     if not x_v1_key:
@@ -213,18 +222,21 @@ async def chat(
     if request.prompt and not msgs:
         msgs = [{"role": "user", "content": request.prompt}]
 
-    session_id = request.session_id or x_session_id or "default"
+    session_id = request.session_id or x_session_id or generate_conversation_fingerprint(v1_key, msgs)
     current_payload_history = msgs
     original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in current_payload_history)
     
     # 3. Context Reconstruction (Observability Phase)
     optimized_msgs = msgs
     reconstruction_log = {}
+    reconstruction_snapshot = ""
 
     if request.enable_optimization and len(current_payload_history) > 1 and key_data:
         try:
             user_key_id = v1_key or "anon"
-            optimized_msgs, reconstruction_log = optimizer.optimize(user_key_id, session_id, current_payload_history)
+            optimized_msgs, res_data = optimizer.optimize(user_key_id, session_id, current_payload_history)
+            reconstruction_log = res_data.get("log", {})
+            reconstruction_snapshot = res_data.get("snapshot", "")
         except Exception as e:
             log.error(f"Optimization Error: {e}")
 
@@ -261,7 +273,8 @@ async def chat(
                 original_tokens, latency_ms,
                 reconstruction_log, or_metadata,
                 raw_messages=full_interaction,
-                response_message=response_msg
+                response_message=response_msg,
+                reconstruction_snapshot=reconstruction_snapshot
             )
             await manager.broadcast(v1_key, {"type": "request", "data": log_entry})
         except Exception as e:

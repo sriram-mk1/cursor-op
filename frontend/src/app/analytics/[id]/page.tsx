@@ -189,7 +189,10 @@ export default function AnalyticsDetailPage() {
                 </div>
 
                 {/* Animation: Sequence directly from DB */}
-                <ReconstructionObserver sequence={requestData?.reconstruction_log?.sequence} />
+                <ReconstructionObserver
+                    sequence={requestData?.reconstruction_log?.sequence}
+                    snapshot={requestData?.reconstruction_snapshot}
+                />
 
             </main>
         </div>

@@ -11,7 +11,7 @@ interface Chunk {
     selected?: boolean;
 }
 
-export function ReconstructionObserver({ sequence }: { sequence: Chunk[] }) {
+export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk[], snapshot?: string }) {
     const [phase, setPhase] = useState<"idle" | "scanning" | "analyzing" | "scoring" | "pruning" | "reordering" | "complete">("idle");
     const [statusText, setStatusText] = useState("SYSTEM READY");
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -301,17 +301,46 @@ export function ReconstructionObserver({ sequence }: { sequence: Chunk[] }) {
                                 </div>
                                 <div style={{ flex: 1, overflowY: 'auto', background: '#050505', padding: '0' }}>
                                     <div style={{ padding: '32px', maxWidth: '800px', margin: '0 auto' }}>
-                                        {(modalTab === 'original' ? rawSequence : filteredChunks).map((chunk, i) => (
-                                            <div key={i} style={{ marginBottom: '16px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.01)', overflow: 'hidden' }}>
-                                                <div style={{ padding: '12px 20px', background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                    <div style={{ fontFamily: 'monospace', fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>
-                                                        NODE_{(chunk.id || `UNKNOWN-${i}`).toUpperCase().replace(/\-/g, '_')}
+                                        {modalTab === 'original' ? (
+                                            rawSequence.map((chunk, i) => (
+                                                <div key={i} style={{ marginBottom: '16px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.01)', overflow: 'hidden' }}>
+                                                    <div style={{ padding: '12px 20px', background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                        <div style={{ fontFamily: 'monospace', fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>
+                                                            NODE_{(chunk.id || `UNKNOWN-${i}`).toUpperCase().replace(/\-/g, '_')}
+                                                        </div>
+                                                        <div style={{ fontSize: '10px', fontWeight: 700, color: (chunk.selected || chunk.score > 0.4) ? 'var(--accent)' : 'rgba(255,255,255,0.2)' }}>SCORE: {chunk.score.toFixed(4)}</div>
                                                     </div>
-                                                    <div style={{ fontSize: '10px', fontWeight: 700, color: (chunk.selected || chunk.score > 0.4) ? 'var(--accent)' : 'rgba(255,255,255,0.2)' }}>SCORE: {chunk.score.toFixed(4)}</div>
+                                                    <div style={{ padding: '20px', fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.6', color: 'rgba(255,255,255,0.7)' }}>{chunk.text}</div>
                                                 </div>
-                                                <div style={{ padding: '20px', fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.6', color: 'rgba(255,255,255,0.7)' }}>{chunk.text}</div>
-                                            </div>
-                                        ))}
+                                            ))
+                                        ) : (
+                                            snapshot ? (
+                                                <div style={{
+                                                    padding: '32px',
+                                                    background: 'rgba(0,255,0,0.02)',
+                                                    border: '1px solid rgba(0,255,0,0.1)',
+                                                    fontFamily: 'monospace',
+                                                    fontSize: '13px',
+                                                    lineHeight: '1.6',
+                                                    color: 'rgba(255,255,255,0.8)',
+                                                    whiteSpace: 'pre-wrap'
+                                                }}>
+                                                    {snapshot}
+                                                </div>
+                                            ) : (
+                                                filteredChunks.map((chunk, i) => (
+                                                    <div key={i} style={{ marginBottom: '16px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.01)', overflow: 'hidden' }}>
+                                                        <div style={{ padding: '12px 20px', background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                            <div style={{ fontFamily: 'monospace', fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>
+                                                                NODE_{(chunk.id || `UNKNOWN-${i}`).toUpperCase().replace(/\-/g, '_')}
+                                                            </div>
+                                                            <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--accent)' }}>SCORE: {chunk.score.toFixed(4)}</div>
+                                                        </div>
+                                                        <div style={{ padding: '20px', fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.6', color: 'rgba(255,255,255,0.7)' }}>{chunk.text}</div>
+                                                    </div>
+                                                ))
+                                            )
+                                        )}
                                     </div>
                                 </div>
                             </div>

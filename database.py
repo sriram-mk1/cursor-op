@@ -48,7 +48,7 @@ class Database:
         return None
 
 
-    def log_request(self, api_key_raw: str, session_id: str, model: str, original_tokens: int, latency_ms: float, reconstruction_log: Dict = None, or_metadata: Dict = None, raw_messages: List = None, response_message: Dict = None):
+    def log_request(self, api_key_raw: str, session_id: str, model: str, original_tokens: int, latency_ms: float, reconstruction_log: Dict = None, or_metadata: Dict = None, raw_messages: List = None, response_message: Dict = None, reconstruction_snapshot: str = ""):
         self._check_db()
         hashed = self._hash_key(api_key_raw)
         now = time.time()
@@ -80,7 +80,8 @@ class Database:
                 "or_id": or_metadata.get("id") if or_metadata else None,
                 "metadata": or_metadata,
                 "raw_messages": raw_messages,
-                "response_message": response_message
+                "response_message": response_message,
+                "reconstruction_snapshot": reconstruction_snapshot
             }
             res_id = str(uuid.uuid4())
             analytics_data["id"] = res_id
