@@ -31,7 +31,7 @@ export function ReconstructionObserver({ sequence }: { sequence: Chunk[] }) {
     }));
 
     const rawSequence = (sequence && sequence.length > 0) ? sequence : mockSequence;
-    const visualChunks = rawSequence.slice(0, 50);
+    const visualChunks = rawSequence.slice(0, 25);
     const filteredChunks = visualChunks.filter(c => c.selected !== undefined ? c.selected : c.score > 0.4);
 
     const runAnimation = async () => {
@@ -304,7 +304,9 @@ export function ReconstructionObserver({ sequence }: { sequence: Chunk[] }) {
                                         {(modalTab === 'original' ? rawSequence : filteredChunks).map((chunk, i) => (
                                             <div key={i} style={{ marginBottom: '16px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.01)', overflow: 'hidden' }}>
                                                 <div style={{ padding: '12px 20px', background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                                    <div style={{ fontFamily: 'monospace', fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>NODE_{chunk.id.toUpperCase().replace(/\-/g, '_')}</div>
+                                                    <div style={{ fontFamily: 'monospace', fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>
+                                                        NODE_{(chunk.id || `UNKNOWN-${i}`).toUpperCase().replace(/\-/g, '_')}
+                                                    </div>
                                                     <div style={{ fontSize: '10px', fontWeight: 700, color: (chunk.selected || chunk.score > 0.4) ? 'var(--accent)' : 'rgba(255,255,255,0.2)' }}>SCORE: {chunk.score.toFixed(4)}</div>
                                                 </div>
                                                 <div style={{ padding: '20px', fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.6', color: 'rgba(255,255,255,0.7)' }}>{chunk.text}</div>
