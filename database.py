@@ -64,22 +64,26 @@ class Database:
         else:
             t_in, t_out, t_saved, t_cost, c_saved = original_tokens, 0, 0, 0, 0
 
+        analytics_data = {}
         try:
             # 2. Upsert Conversation (Thread Entry)
             convo_id = None
             try:
-                # Find current user for metadata if possible
+                # Find current user for metadata
                 key_info = self.supabase.table("api_keys").select("user_id").eq("hashed_key", hashed).single().execute()
                 user_id = key_info.data.get("user_id") if key_info.data else None
                 
-                # Extract first query as title
+                # Title from First User Message
                 title = "New Conversation"
                 if raw_messages:
                     for m in raw_messages:
                         if m.get("role") == "user":
                             content = m.get("content", "")
                             if isinstance(content, str):
-                                title = content[:100]
+                                title = (content[:97] + "...") if len(content) > 100 else content
+                                break
+                            elif isinstance(content, list):
+                                title = "Multipart Query"
                                 break
                 
                 convo_data = {
@@ -89,24 +93,24 @@ class Database:
                     "last_request_at": now,
                     "title": title
                 }
-                # Upsert conversation record
+                logger.info(f"Upserting convo: {session_id} | Title: {title}")
                 convo_res = self.supabase.table("conversations").upsert(convo_data, on_conflict="session_id").execute()
                 if convo_res.data:
-                    convo_id = convo_res.data[0]["id"]
+                    convo_id = convo_res.data[0].get("id")
             except Exception as ce:
-                logger.warning(f"Could not upsert conversation: {ce}")
+                logger.error(f"CONVO UPSERT FAIL: {ce}")
 
-            # 3. Update Session (Living State)
+            # 3. Update Session State (Stateless Cache)
             try:
                 self.supabase.table("sessions").upsert({
                     "session_id": session_id,
-                    "data": {"last_model": model, "last_latency": latency_ms},
+                    "data": {"last_model": model, "active": True},
                     "updated_at": now
                 }, on_conflict="session_id").execute()
-            except: pass
+            except Exception as se:
+                logger.warning(f"SESSION UPSERT FAIL: {se}")
 
-            # 4. Final Analytics Logs
-            # Pack metadata into reconstruction_log to preserve it for the frontend
+            # 4. Final Analytics Record
             final_log = reconstruction_log or {}
             if or_metadata:
                 final_log["or_metadata"] = or_metadata
@@ -130,23 +134,28 @@ class Database:
                 "response_message": response_message,
                 "optimized_prompt": reconstruction_snapshot
             }
+            logger.info(f"Inserting analytics: {analytics_data['id']} for session {session_id}")
             self.supabase.table("analytics").insert(analytics_data).execute()
 
-            # 5. Update global API Key aggregate stats
+            # 5. Update global Key stats
             try:
-                key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
-                if key_data.data:
-                    self.supabase.table("api_keys").update({
-                        "total_tokens_saved": (key_data.data.get("total_tokens_saved") or 0) + t_saved,
-                        "total_requests": (key_data.data.get("total_requests") or 0) + 1
-                    }).eq("hashed_key", hashed).execute()
-            except Exception as ke:
-                logger.warning(f"Could not update key stats: {ke}")
+                self.supabase.rpc("increment_key_stats", {
+                    "key_hash": hashed, 
+                    "saved": t_saved
+                }).execute()
+            except:
+                # Fallback to manual update if RPC doesn't exist
+                try:
+                    key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
+                    if key_data.data:
+                        self.supabase.table("api_keys").update({
+                            "total_tokens_saved": (key_data.data.get("total_tokens_saved") or 0) + t_saved,
+                            "total_requests": (key_data.data.get("total_requests") or 0) + 1
+                        }).eq("hashed_key", hashed).execute()
+                except: pass
 
         except Exception as e:
-            logger.error(f"DB Logging Error: {e}")
-            # Ensure we still return the data for the broadcast
-            analytics_data = locals().get("analytics_data", {})
+            logger.error(f"CRITICAL DB LOGGING ERROR: {e}")
 
         return analytics_data
 

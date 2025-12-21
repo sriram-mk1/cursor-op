@@ -109,12 +109,21 @@ class ChatRequest(BaseModel):
     api_key: Optional[str] = None # Support key in payload
 
 def generate_conversation_fingerprint(v1_key: str, messages: List[Dict]) -> str:
-    """Generates a unique ID for a thread based on its first message + user key."""
+    """Generates a unique ID for a thread based on its first message content + user key."""
     if not messages: return "default"
-    # Find the first user message
-    first_msg = next((m for m in messages if m.get("role") == "user"), messages[0])
-    # Hash of v1_key + first message content ensures isolation
-    seed = f"{v1_key}:{json.dumps(first_msg, sort_keys=True)}"
+    
+    # 1. Find the first user message (the anchor of the conversation)
+    first_user_msg = next((m for m in messages if m.get("role") == "user"), messages[0])
+    
+    # 2. Extract ONLY the core data that is stable across requests
+    # Ignoring IDs, timestamps, or transient metadata added by chat libraries
+    stable_role = str(first_user_msg.get("role", "user"))
+    stable_content = first_user_msg.get("content", "")
+    if not isinstance(stable_content, str):
+        stable_content = json.dumps(stable_content, sort_keys=True)
+    
+    # 3. Hash of v1_key + stable first message ensures perfect isolation
+    seed = f"{v1_key}:{stable_role}:{stable_content}"
     return hashlib.sha256(seed.encode()).hexdigest()[:16]
 
 @app.get("/api/stats")
