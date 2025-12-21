@@ -7,6 +7,9 @@ import re
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass, field, asdict
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 1. Define the compute environment
 image = modal.Image.debian_slim().pip_install(
@@ -84,75 +87,78 @@ class RemoteOptimizer:
         if len(current_messages) <= 1:
             return current_messages, {"mode": "passthrough", "overhead_ms": 0}
 
+        # 1. Identify Roles
+        system_msgs = [m for m in current_messages[:-1] if m.get("role") == "system"]
+        # History is everything between system prompts and last message
+        history_msgs = [m for m in current_messages[:-1] if m.get("role") != "system"]
         query_msg = current_messages[-1]
         query_text = query_msg.get("content", "")
-        history = current_messages[:-1]
 
-        # 1. Chunking
-        chunks = self._chunk_messages(history)
-        if not chunks:
+        if not history_msgs:
             return current_messages, {"mode": "no_history", "overhead_ms": 0}
 
-        # 2. Embedding (Stateless)
+        # 2. Chunking (Only history)
+        chunks = self._chunk_messages(history_msgs)
+        if not chunks:
+            return current_messages, {"mode": "no_chunks", "overhead_ms": 0}
+
+        # 3. Embedding (Stateless)
         query_emb = list(self.model.embed([f"search_query: {query_text}"]))[0]
         chunk_texts = [f"search_document: {c.text}" for c in chunks]
         chunk_embs = list(self.model.embed(chunk_texts))
 
-        # 3. Hybrid Scoring
+        # 4. Hybrid Scoring
         query_symbols = set(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)', query_text))
         for i, (chunk, emb) in enumerate(zip(chunks, chunk_embs)):
-            # Semantic
             sim = np.dot(query_emb, emb) / (np.linalg.norm(query_emb) * np.linalg.norm(emb) + 1e-9)
-            # Symbol Anchor boost (1.3x)
             matching = query_symbols.intersection(set(chunk.symbols))
             boost = 1.3 if matching else 1.0
-            # Recency bias
-            recency = 1.0 + (chunk.msg_index / len(history)) * 0.1
+            # Recency bias relative to history_msgs length
+            recency = 1.0 + (chunk.msg_index / len(history_msgs)) * 0.1
             chunk.score = sim * boost * recency
 
-        # 4. Filter & Reconstruct
-        # Keep top chunks (up to 4000 tokens)
+        # 5. Selection
         sorted_chunks = sorted(chunks, key=lambda x: x.score, reverse=True)
-        selected = []
+        selected_indices = set()
         total_tokens = 0
         for c in sorted_chunks:
-            if c.score < 0.3 and total_tokens > 500: break # Minimum relevance floor
-            if total_tokens + c.tokens > 4000: break
-            selected.append(c)
+            if c.score < 0.25 and total_tokens > 1000: break 
+            if total_tokens + c.tokens > 6000: break
+            selected_indices.add((c.msg_index, c.chunk_index))
             total_tokens += c.tokens
 
-        # Restore order
-        reconstructed = sorted(selected, key=lambda x: (x.msg_index, x.chunk_index))
+        # 6. Reconstruction with Role Preservation
+        optimized_history = []
+        for msg_idx, msg in enumerate(history_msgs):
+            # Find all selected chunks for this message
+            msg_chunks = [c for c in chunks if c.msg_index == msg_idx and (c.msg_index, c.chunk_index) in selected_indices]
+            if msg_chunks:
+                # Group chunks back into a single message
+                # Sort them by chunk_index to maintain internal order
+                msg_chunks.sort(key=lambda x: x.chunk_index)
+                reconstructed_content = "\n".join([c.text for c in msg_chunks])
+                
+                # Create a new message with the original metadata but updated content
+                new_msg = msg.copy()
+                new_msg["content"] = reconstructed_content
+                optimized_history.append(new_msg)
+
+        # 7. Final Assembly
+        # [System] + [Optimized History] + [Query]
+        optimized = system_msgs + optimized_history + [query_msg]
         
-        # Build CLEAN snapshot
-        snapshot_parts = []
-        last_idx = -1
-        for c in reconstructed:
-            if c.msg_index != last_idx:
-                snapshot_parts.append(f"\n--- [TURN {c.msg_index}] ---")
-                last_idx = c.msg_index
-            snapshot_parts.append(c.text)
-        
-        snapshot_text = "ORIGINAL_CONTEXT_SNAPSHOT:\n" + "\n".join(snapshot_parts)
-        
-        # FINAL PACKED MESSAGES (Pure, No extra fields)
-        optimized = []
-        # Keep system prompt if it exists
-        sys_prompt = next((m for m in history if m.get("role") == "system"), None)
-        if sys_prompt: optimized.append(sys_prompt)
-        
-        optimized.append({"role": "system", "content": snapshot_text})
-        optimized.append(query_msg)
+        # Prepare Metadata
+        snapshot_preview = "\n\n".join([f"[{m['role'].upper()}]: {m['content'][:200]}..." for m in optimized_history])
 
         return optimized, {
-            "snapshot": snapshot_text,
+            "snapshot": snapshot_preview,
             "log": {
                 "total_chunks": len(chunks),
-                "selected_chunks": len(selected),
+                "selected_chunks": len(selected_indices),
                 "top_score": round(max(c.score for c in chunks), 3) if chunks else 0,
                 "overhead_ms": (time.time() - start_time) * 1000
             },
-            "engine": "v7-stateless-anchor"
+            "engine": "v8-role-preserving"
         }
 
     @modal.web_endpoint(method="POST")

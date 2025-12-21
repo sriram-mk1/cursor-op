@@ -20,51 +20,35 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
     const containerRef = useRef<HTMLDivElement>(null);
     const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
-    // Mock sequence
-    const mockSequence = Array.from({ length: 20 }).map((_, i) => ({
-        id: `mock-${i}`,
-        text: i % 3 === 0
-            ? `System: Critical instruction set ${i} regarding security protocols and database locks...`
-            : `User: Transient query regarding component padding and legacy API routes ${i}...`,
-        score: i % 3 === 0 ? 0.92 : 0.15,
-        selected: i % 3 === 0
-    }));
-
-    const rawSequence = (sequence && sequence.length > 0) ? sequence : mockSequence;
-    const visualChunks = rawSequence.slice(0, 25);
-    const filteredChunks = visualChunks.filter(c => c.selected !== undefined ? c.selected : c.score > 0.4);
+    const rawSequence = sequence || [];
+    const filteredChunks = rawSequence.filter(c => c.selected !== undefined ? c.selected : c.score > 0.4);
 
     const runAnimation = async () => {
+        if (rawSequence.length === 0) return;
         setPhase("idle");
         setStatusText("INITIALIZING BUFFER");
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, 600));
 
-        // 1. Scanning
         setPhase("scanning");
         setStatusText("CONTEXTUAL SCAN");
-        await new Promise(r => setTimeout(r, 2000));
-
-        // 2. Analyzing
-        setPhase("analyzing");
-        setStatusText("RELEVANCE ANALYSIS");
-        await new Promise(r => setTimeout(r, 1200));
-
-        // 3. Scoring
-        setPhase("scoring");
-        setStatusText("SEMANTIC GRADING");
-        await new Promise(r => setTimeout(r, 1200));
-
-        // 4. Pruning
-        setPhase("pruning");
-        setStatusText("NOISE ELIMINATION");
         await new Promise(r => setTimeout(r, 1500));
 
-        // 5. Reordering
+        setPhase("analyzing");
+        setStatusText("RELEVANCE ANALYSIS");
+        await new Promise(r => setTimeout(r, 1000));
+
+        setPhase("scoring");
+        setStatusText("SEMANTIC GRADING");
+        await new Promise(r => setTimeout(r, 1000));
+
+        setPhase("pruning");
+        setStatusText("NOISE ELIMINATION");
+        await new Promise(r => setTimeout(r, 1200));
+
         setPhase("reordering");
         setStatusText("STREAM RECONSTRUCTION");
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 1500));
 
-        // 6. Complete
         setPhase("complete");
         setStatusText("OPTIMIZATION COMPLETE");
     };
@@ -84,28 +68,31 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
         window.addEventListener('resize', handleResize);
         handleResize();
         return () => window.removeEventListener('resize', handleResize);
-    }, []);
+    }, [sequence]); // Rerun when sequence changes
 
-    // Grid Props
-    const COLS = 5;
-    const GAP = 16;
-    const CELL_W = (dimensions.width - 100 - (COLS - 1) * GAP) / COLS;
-    const CELL_H = 70;
+    // Dynamic Grid Calcs
+    const count = rawSequence.length || 1;
+    const COLS = Math.ceil(Math.sqrt(count * 1.5));
+    const GAP = Math.max(4, 20 - Math.floor(count / 5));
+    const PADDING = 40;
+
+    const CELL_W = (dimensions.width - PADDING * 2 - (COLS - 1) * GAP) / COLS;
+    const CELL_H = Math.max(30, Math.min(80, (dimensions.height - 200) / Math.ceil(count / COLS)));
 
     const getGridPos = (i: number) => {
         const col = i % COLS;
         const row = Math.floor(i / COLS);
         return {
-            x: 50 + col * (CELL_W + GAP),
+            x: PADDING + col * (CELL_W + GAP),
             y: 100 + row * (CELL_H + GAP)
         };
     };
 
     const getReorderedPos = (id: string) => {
         const index = filteredChunks.findIndex(c => c.id === id);
-        if (index === -1) return { x: 0, y: 0 };
+        if (index === -1) return { x: dimensions.width / 2, y: dimensions.height + 100 };
 
-        const REORDER_COLS = 2;
+        const REORDER_COLS = Math.min(3, filteredChunks.length);
         const stackWidth = REORDER_COLS * CELL_W + (REORDER_COLS - 1) * GAP;
         const startX = (dimensions.width - stackWidth) / 2;
 
@@ -173,7 +160,7 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
                 </div>
 
                 <AnimatePresence>
-                    {visualChunks.map((chunk, i) => {
+                    {rawSequence.map((chunk, i) => {
                         const isKept = chunk.selected !== undefined ? chunk.selected : chunk.score > 0.4;
 
                         let target = { x: 0, y: 0, opacity: 1, scale: 1, borderColor: 'rgba(255,255,255,0.1)' };

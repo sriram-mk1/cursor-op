@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { motion } from "framer-motion";
 import {
-    ArrowLeft, Shield, Database, Activity, TrendingUp, Cpu, Server, Clock, Zap
+    ArrowLeft, Shield, Database, Activity, Cpu, Server, Zap
 } from "lucide-react";
 import { ReconstructionObserver } from "@/components/ReconstructionObserver";
 import { createClient } from "@/utils/supabase";
@@ -16,6 +16,7 @@ export default function AnalyticsDetailPage() {
     const [requestData, setRequestData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const supabase = createClient();
+    const [relatedRequests, setRelatedRequests] = useState<any[]>([]);
 
     const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000";
 
@@ -30,8 +31,14 @@ export default function AnalyticsDetailPage() {
                         headers: { "x-user-id": userId }
                     });
                     const data = await resp.json();
-                    const req = data.recent_requests?.find((r: any) => r.id === params.id);
-                    if (req) setRequestData(req);
+                    const allReqs = data.recent_requests || [];
+                    const req = allReqs.find((r: any) => r.id === params.id);
+                    if (req) {
+                        setRequestData(req);
+                        // Filter for other requests in the same fingerprint thread (session_id)
+                        const thread = allReqs.filter((r: any) => r.session_id === req.session_id && r.id !== req.id);
+                        setRelatedRequests(thread.sort((a: any, b: any) => b.timestamp - a.timestamp));
+                    }
                 } catch (e) {
                     console.error("Failed to fetch detail", e);
                 }
@@ -42,13 +49,14 @@ export default function AnalyticsDetailPage() {
     }, [params.id, GATEWAY_URL, supabase.auth]);
 
     // Robust Fallback Access using real DB column 'metadata'
-    // 'or_data' comes from OpenRouter's generation stats endpoint
     const or_data = requestData?.metadata || {};
     const usage_cost = or_data.total_cost || requestData?.total_cost_usd || 0;
 
     // Formatting Helpers
     const formatCost = (val: number) => `$${(val || 0).toFixed(6)}`;
     const formatMs = (val: number) => `${Math.round(val || 0)}ms`;
+
+    if (loading) return <div style={{ background: '#050505', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white' }}>LOADING SCAN...</div>;
 
     return (
         <div className="layout-wrapper" style={{ background: '#050505', minHeight: '100vh' }}>
@@ -78,9 +86,23 @@ export default function AnalyticsDetailPage() {
                     </button>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <div>
-                            <h1 style={{ fontSize: "36px", fontWeight: 700, letterSpacing: '-0.04em', lineHeight: 1, marginBottom: '8px' }}>OpenRouter Generation Report</h1>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                                <h1 style={{ fontSize: "36px", fontWeight: 700, letterSpacing: '-0.04em', lineHeight: 1, margin: 0 }}>Optimization Report</h1>
+                                <span style={{
+                                    background: 'rgba(var(--accent-rgb), 0.15)',
+                                    color: 'var(--accent)',
+                                    fontSize: '10px',
+                                    fontWeight: 800,
+                                    padding: '4px 10px',
+                                    borderRadius: '100px',
+                                    border: '1px solid rgba(var(--accent-rgb), 0.2)',
+                                    letterSpacing: '0.05em'
+                                }}>
+                                    THREAD ISOLATED
+                                </span>
+                            </div>
                             <div style={{ fontFamily: 'monospace', fontSize: '13px', color: 'rgba(255,255,255,0.3)', display: 'flex', gap: '16px' }}>
-                                <span>SESSION: {requestData?.session_id || 'N/A'}</span>
+                                <span>FINGERPRINT: <span style={{ color: 'rgba(255,255,255,0.6)' }}>{requestData?.session_id || 'N/A'}</span></span>
                                 {or_data.id && <span>OR_ID: {or_data.id}</span>}
                             </div>
                         </div>
@@ -91,7 +113,7 @@ export default function AnalyticsDetailPage() {
                     </div>
                 </header>
 
-                {/* Primary Data Grid (Bento Style) - Real Real Data */}
+                {/* Primary Data Grid (Bento Style) */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '24px', marginBottom: '64px' }}>
 
                     {/* Financial Metrics */}
@@ -133,8 +155,8 @@ export default function AnalyticsDetailPage() {
                                 <div style={{ fontSize: '18px', fontWeight: 700 }}>{or_data.tokens_completion || requestData?.tokens_out || 0}</div>
                             </div>
                             <div style={{ gridColumn: 'span 2' }}>
-                                <div style={{ fontSize: '9px', opacity: 0.4, marginBottom: '4px' }}>NATIVE CACHED</div>
-                                <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--accent)' }}>{or_data.native_tokens_cached || 0}</div>
+                                <div style={{ fontSize: '9px', opacity: 0.4, marginBottom: '4px' }}>SAVINGS</div>
+                                <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--accent)' }}>{requestData?.tokens_saved || 0} T</div>
                             </div>
                         </div>
                     </div>
@@ -151,15 +173,9 @@ export default function AnalyticsDetailPage() {
                         </div>
                         <div style={{ fontSize: '11px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.6 }}>
-                                <span>Generation</span>
-                                <span>{formatMs(or_data.generation_time)}</span>
+                                <span>Optimization</span>
+                                <span>{formatMs(requestData?.reconstruction_log?.overhead_ms)}</span>
                             </div>
-                            {or_data.moderation_latency > 0 && (
-                                <div style={{ display: 'flex', justifyContent: 'space-between', opacity: 0.6 }}>
-                                    <span>Moderation</span>
-                                    <span>{formatMs(or_data.moderation_latency)}</span>
-                                </div>
-                            )}
                         </div>
                     </div>
 
@@ -178,21 +194,54 @@ export default function AnalyticsDetailPage() {
                                 <span style={{ opacity: 0.5 }}>Route</span>
                                 <span>{or_data.provider_name || 'Auto-Router'}</span>
                             </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <span style={{ opacity: 0.5 }}>Finish</span>
-                                <span style={{ textTransform: 'uppercase', background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '2px', fontSize: '9px' }}>
-                                    {or_data.finish_reason || 'STOP'}
-                                </span>
-                            </div>
                         </div>
                     </div>
                 </div>
 
                 {/* Animation: Sequence directly from DB */}
-                <ReconstructionObserver
-                    sequence={requestData?.reconstruction_log?.sequence}
-                    snapshot={requestData?.reconstruction_snapshot}
-                />
+                <div style={{ marginBottom: '64px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+                        <Zap size={18} className="text-accent" />
+                        <h2 style={{ fontSize: '18px', fontWeight: 700, letterSpacing: '-0.02em', margin: 0 }}>Stateless Context Reconstruction</h2>
+                    </div>
+                    <ReconstructionObserver
+                        sequence={requestData?.reconstruction_log?.sequence}
+                        snapshot={requestData?.reconstruction_snapshot}
+                    />
+                </div>
+
+                {/* Thread History */}
+                {relatedRequests.length > 0 && (
+                    <div style={{ marginTop: '64px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '24px' }}>
+                            <Server size={18} className="text-secondary" />
+                            <h2 style={{ fontSize: '18px', fontWeight: 700, letterSpacing: '-0.02em', margin: 0 }}>Related Thread History</h2>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '1px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.05)' }}>
+                            {relatedRequests.map((req: any) => (
+                                <div
+                                    key={req.id}
+                                    onClick={() => router.push(`/analytics/${req.id}`)}
+                                    style={{
+                                        background: '#050505',
+                                        padding: '16px 24px',
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr 2fr 1fr 1fr',
+                                        alignItems: 'center',
+                                        cursor: 'pointer',
+                                        transition: 'background 0.2s ease'
+                                    }}
+                                    className="hover-bg-muted"
+                                >
+                                    <div style={{ fontSize: '12px', opacity: 0.4 }}>{new Date(req.timestamp * 1000).toLocaleTimeString()}</div>
+                                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{req.model.split('/').pop()}</div>
+                                    <div style={{ fontSize: '13px', color: 'var(--accent)' }}>{req.tokens_saved} SAVED</div>
+                                    <div style={{ fontSize: '13px', textAlign: 'right', opacity: 0.5 }}>{formatMs(req.latency_ms)}</div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
 
             </main>
         </div>
