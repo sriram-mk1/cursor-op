@@ -110,12 +110,7 @@ class Database:
             except Exception as se:
                 logger.warning(f"SESSION UPSERT FAIL: {se}")
 
-            # 4. Final Analytics Record
-            final_log = reconstruction_log or {}
-            if or_metadata:
-                final_log["or_metadata"] = or_metadata
-
-            analytics_data = {
+                analytics_data = {
                 "id": str(uuid.uuid4()),
                 "hashed_key": hashed,
                 "conversation_id": convo_id,
@@ -127,7 +122,8 @@ class Database:
                 "latency_ms": latency_ms,
                 "cost_saved_usd": float(c_saved),
                 "total_cost_usd": float(t_cost),
-                "reconstruction_log": final_log,
+                "reconstruction_log": reconstruction_log or {}, # Pure reconstruction data
+                "metadata": or_metadata or {}, # OpenRouter/Provider metadata
                 "timestamp": now,
                 "or_id": or_metadata.get("id") if or_metadata else None,
                 "raw_messages": raw_messages,
@@ -139,12 +135,13 @@ class Database:
 
             # 5. Update global Key stats
             try:
+                # Optimized Path: Single RPC call (Atomicity + Speed)
                 self.supabase.rpc("increment_key_stats", {
                     "key_hash": hashed, 
-                    "saved": t_saved
+                    "saved": int(t_saved)
                 }).execute()
             except:
-                # Fallback to manual update if RPC doesn't exist
+                # Reliability Path: Manual update if RPC fails
                 try:
                     key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
                     if key_data.data:
@@ -152,7 +149,8 @@ class Database:
                             "total_tokens_saved": (key_data.data.get("total_tokens_saved") or 0) + t_saved,
                             "total_requests": (key_data.data.get("total_requests") or 0) + 1
                         }).eq("hashed_key", hashed).execute()
-                except: pass
+                except Exception as ke:
+                    logger.warning(f"Stats Update Fail: {ke}")
 
         except Exception as e:
             logger.error(f"CRITICAL DB LOGGING ERROR: {e}")

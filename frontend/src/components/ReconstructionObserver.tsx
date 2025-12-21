@@ -84,24 +84,34 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
         const row = Math.floor(i / COLS);
         return {
             x: PADDING + col * (CELL_W + GAP),
-            y: 100 + row * (CELL_H + GAP)
+            y: 100 + row * (CELL_H + GAP),
+            w: CELL_W,
+            h: CELL_H
         };
     };
 
     const getReorderedPos = (id: string) => {
         const index = filteredChunks.findIndex(c => c.id === id);
-        if (index === -1) return { x: dimensions.width / 2, y: dimensions.height + 100 };
+        if (index === -1) return { x: dimensions.width / 2, y: dimensions.height + 100, w: CELL_W, h: CELL_H };
 
-        const REORDER_COLS = Math.min(3, filteredChunks.length);
-        const stackWidth = REORDER_COLS * CELL_W + (REORDER_COLS - 1) * GAP;
-        const startX = (dimensions.width - stackWidth) / 2;
+        // Scale columns: Fewer columns for fewer bits of data to make it look like a list
+        const REORDER_COLS = filteredChunks.length <= 4 ? 1 : (filteredChunks.length <= 12 ? 2 : 3);
+
+        // Calculate item width based on reordered columns
+        const itemW = (dimensions.width - PADDING * 2 - (REORDER_COLS - 1) * GAP) / REORDER_COLS;
+        const startX = PADDING;
+
+        // Ensure a decent height for text visibility (min 65px)
+        const reorderCellH = Math.max(65, CELL_H);
 
         const col = index % REORDER_COLS;
         const row = Math.floor(index / REORDER_COLS);
 
         return {
-            x: startX + col * (CELL_W + GAP),
-            y: 120 + row * (CELL_H + GAP)
+            x: startX + col * (itemW + GAP),
+            y: 120 + row * (reorderCellH + GAP),
+            w: itemW,
+            h: reorderCellH
         };
     };
 
@@ -116,7 +126,8 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
                     background: '#0a0a0a',
                     border: '1px solid rgba(255,255,255,0.1)',
                     marginBottom: '24px',
-                    overflow: 'hidden'
+                    overflowY: 'auto',
+                    overflowX: 'hidden'
                 }}
             >
                 {/* Background Grid */}
@@ -163,25 +174,25 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
                     {rawSequence.map((chunk, i) => {
                         const isKept = chunk.selected !== undefined ? chunk.selected : chunk.score > 0.4;
 
-                        let target = { x: 0, y: 0, opacity: 1, scale: 1, borderColor: 'rgba(255,255,255,0.1)' };
+                        let target = { x: 0, y: 0, w: CELL_W, h: CELL_H, opacity: 1, scale: 1, borderColor: 'rgba(255,255,255,0.1)' };
                         const initial = getGridPos(i);
 
                         // Standard Phase State Machine
                         switch (phase) {
                             case "idle":
-                                target = { ...initial, opacity: 0, scale: 0.8, borderColor: 'rgba(255,255,255,0.1)' };
+                                target = { ...initial, w: CELL_W, h: CELL_H, opacity: 0, scale: 0.8, borderColor: 'rgba(255,255,255,0.1)' };
                                 break;
                             case "scanning":
-                                target = { ...initial, opacity: 1, scale: 1, borderColor: 'rgba(255,255,255,0.1)' };
+                                target = { ...initial, w: CELL_W, h: CELL_H, opacity: 1, scale: 1, borderColor: 'rgba(255,255,255,0.1)' };
                                 break;
                             case "analyzing":
-                                target = { ...initial, opacity: 1, scale: isKept ? 1.05 : 1, borderColor: isKept ? 'var(--accent)' : 'rgba(255,255,255,0.1)' };
+                                target = { ...initial, w: CELL_W, h: CELL_H, opacity: 1, scale: isKept ? 1.05 : 1, borderColor: isKept ? 'var(--accent)' : 'rgba(255,255,255,0.1)' };
                                 break;
                             case "scoring":
-                                target = { ...initial, opacity: 1, scale: 1, borderColor: isKept ? 'var(--accent)' : '#ef4444' };
+                                target = { ...initial, w: CELL_W, h: CELL_H, opacity: 1, scale: 1, borderColor: isKept ? 'var(--accent)' : '#ef4444' };
                                 break;
                             case "pruning":
-                                target = { ...initial, opacity: isKept ? 1 : 0.05, scale: isKept ? 1 : 0.9, borderColor: isKept ? 'var(--accent)' : '#ef4444' };
+                                target = { ...initial, w: CELL_W, h: CELL_H, opacity: isKept ? 1 : 0.05, scale: isKept ? 1 : 0.9, borderColor: isKept ? 'var(--accent)' : '#ef4444' };
                                 break;
                             case "reordering":
                             case "complete":
@@ -189,7 +200,7 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
                                     const reordered = getReorderedPos(chunk.id);
                                     target = { ...reordered, opacity: 1, scale: 1, borderColor: 'var(--accent)' };
                                 } else {
-                                    target = { ...initial, opacity: 0, scale: 0.5, borderColor: '#ef4444' };
+                                    target = { ...initial, w: CELL_W, h: CELL_H, opacity: 0, scale: 0.5, borderColor: '#ef4444' };
                                 }
                                 break;
                         }
@@ -198,12 +209,14 @@ export function ReconstructionObserver({ sequence, snapshot }: { sequence: Chunk
 
                         return (
                             <motion.div
-                                key={chunk.id}
+                                key={`${chunk.id}-${i}`}
                                 layoutId={`chunk-${chunk.id}`}
                                 initial={phase === "idle" ? { x: initial.x, y: initial.y, opacity: 0 } : false}
                                 animate={{
                                     x: target.x,
                                     y: target.y,
+                                    width: target.w,
+                                    height: target.h,
                                     opacity: target.opacity,
                                     scale: target.scale,
                                     borderColor: target.borderColor,

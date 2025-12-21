@@ -239,17 +239,23 @@ async def chat(
     session_id = request.session_id or x_session_id or generate_conversation_fingerprint(v1_key, msgs)
     
     # 3. Isolation Injection: Pass session fingerprint into the context
-    # This acts as an identifier 'for us' and ensures the LLM 'knows' the thread limits
+    # Only do this if it's not already present in the history to avoid duplication
+    fingerprint_marker = f"conversation_fingerprint: {session_id}"
+    has_fingerprint = any(fingerprint_marker in str(m.get("content", "")) for m in msgs)
+    
     msgs_with_fingerprint = msgs.copy()
-    if msgs_with_fingerprint:
+    if not has_fingerprint and msgs_with_fingerprint:
         # We inject a hidden identifier into the first message or a system message
-        fingerprint_msg = {"role": "system", "content": f"conversation_fingerprint: {session_id}"}
+        fingerprint_msg = {"role": "system", "content": fingerprint_marker}
         # Insert after any existing system prompts, or at start
         system_indices = [i for i, m in enumerate(msgs_with_fingerprint) if m.get("role") == "system"]
         if system_indices:
             msgs_with_fingerprint.insert(system_indices[-1] + 1, fingerprint_msg)
         else:
             msgs_with_fingerprint.insert(0, fingerprint_msg)
+
+    # Heuristic: Skip logging for auto-titling requests to keep dashboard clean
+    is_titling_request = any("conversation title" in str(m.get("content", "")).lower() for m in msgs)
 
     current_payload_history = msgs_with_fingerprint
     original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in current_payload_history)
@@ -277,7 +283,7 @@ async def chat(
     headers = {"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"}
 
     async def log_and_broadcast(gen_id: str, status_code: int, latency_ms: float, response_msg: Dict = None):
-        if not v1_key: return
+        if not v1_key or is_titling_request: return
         
         # Async Metadata
         or_metadata = None
