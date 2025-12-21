@@ -109,6 +109,9 @@ class RemoteOptimizer:
 
     @modal.method()
     def optimize(self, user_key: str, session_id: str, current_messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        return self._optimize_internal(user_key, session_id, current_messages)
+
+    def _optimize_internal(self, user_key: str, session_id: str, current_messages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         start_time = time.time()
         
         if not current_messages:
@@ -231,7 +234,7 @@ class RemoteOptimizer:
     @modal.web_endpoint(method="POST")
     def optimize_web(self, payload: Dict[str, Any]):
         """Simple HTTP endpoint for Railway to call."""
-        return self.optimize(
+        return self._optimize_internal(
             payload["user_key"], 
             payload["session_id"], 
             payload["current_messages"]
