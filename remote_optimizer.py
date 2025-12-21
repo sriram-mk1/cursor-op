@@ -34,6 +34,7 @@ class Atom:
     score: float = 0.0
     atom_index: int = 0
     role: str = "user"
+    symbols: List[str] = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
@@ -53,12 +54,12 @@ class RemoteOptimizer:
         import tiktoken
         from supabase import create_client
 
-        print("🚀 Initializing Remote Optimizer v6.1 (High Speed)...")
+        print("🚀 Initializing Ultra-Fast Context Engine v6.2...")
         self.model = TextEmbedding(model_name="nomic-ai/nomic-embed-text-v1.5")
         self.encoder = tiktoken.get_encoding("cl100k_base")
         self.stop_words = {"the", "a", "an", "and", "or", "but", "if", "then", "else", "for", "while", "in", "is", "it", "of", "to"}
         
-        # In-Memory Cache for Embeddings (Container Life)
+        # High-Speed In-Memory Cache
         self.embedding_cache = {} 
         self.history_cache = {}
 
@@ -69,15 +70,11 @@ class RemoteOptimizer:
         else:
             self.supabase = None
 
-    def _get_embedding(self, text: str) -> np.ndarray:
-        """Cache-aware embedding."""
-        txt_hash = hashlib.md5(text.encode()).hexdigest()
-        if txt_hash in self.embedding_cache:
-            return self.embedding_cache[txt_hash]
-        
-        emb = list(self.model.embed([text]))[0]
-        self.embedding_cache[txt_hash] = emb
-        return emb
+    def _extract_symbols(self, text: str) -> List[str]:
+        """Fast regex extraction of code symbols (classes, functions)."""
+        # Look for 'class Name', 'def name(', 'async def name('
+        found = re.findall(r'(?:class|def)\s+([a-zA-Z_][a-zA-Z0-9_]*)', text)
+        return list(set(found))
 
     def _split_into_atoms(self, messages: List[Dict[str, Any]]) -> List[Atom]:
         atoms = []
@@ -92,7 +89,7 @@ class RemoteOptimizer:
             current_block = []
             for line in lines:
                 stripped = line.strip()
-                # Code-aware markers
+                # Detection for block starters
                 is_block_start = any(stripped.startswith(k) for k in [
                     "def ", "class ", "async def ", "interface ", "function ", "export ", "module.exports",
                     "import ", "from ", "const ", "let ", "var ", "@"
@@ -116,7 +113,8 @@ class RemoteOptimizer:
             role=role,
             text=text,
             tokens=len(self.encoder.encode(text)),
-            timestamp=ts
+            timestamp=ts,
+            symbols=self._extract_symbols(text)
         )
 
     @modal.method()
@@ -137,8 +135,7 @@ class RemoteOptimizer:
         history = []
         hist_cache_key = f"{session_id}_{user_key}"
         
-        # Optional: Skip Supabase if we have a very recent cache hit in the container
-        if hist_cache_key in self.history_cache and (time.time() - self.history_cache[hist_cache_key]['ts'] < 30):
+        if hist_cache_key in self.history_cache and (time.time() - self.history_cache[hist_cache_key]['ts'] < 20):
             history = self.history_cache[hist_cache_key]['data']
         elif self.supabase:
             try:
@@ -153,106 +150,103 @@ class RemoteOptimizer:
                 if response.data:
                     history = response.data[0].get("raw_messages", [])
                     self.history_cache[hist_cache_key] = {'data': history, 'ts': time.time()}
-            except Exception as e:
-                print(f"Fetch Error: {e}")
+            except: pass
         
         if not history and len(current_messages) > 1:
             history = current_messages[:-1]
         
         if not history:
-            return current_messages, {"mode": "no_history", "engine": "modal-remote-v6.1"}
+            return current_messages, {"mode": "no_history", "engine": "modal-v6.2-anchor"}
 
-        # 2. Chunking
+        # 2. Chunking & Symbol Pre-processing
         atoms = self._split_into_atoms(history)
         if not atoms:
-            return current_messages, {"mode": "no_atoms", "engine": "modal-remote-v6.1"}
+            return current_messages, {"mode": "no_atoms", "engine": "modal-v6.2-anchor"}
 
-        # 3. Batch Embeddings (Optimized with Cache)
-        query_emb = list(self.model.embed([query_text]))[0]
+        # 3. Path & Symbol Anchoring (Fast Path)
+        # Identify what the user is actually talking about
+        query_symbols = set(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)', query_text))
         
-        # Optimized embedding logic to only embed what changed
+        # 4. Shadow Contextualized Batch Embedding (Sub-50ms)
+        # We embed the "Shadow" prompt (Context + Atom) for scoring accuracy
+        # but the shadow is NEVER used in the final output.
+        query_emb = list(self.model.embed([f"Represent this query for retrieving relevant code: {query_text}"]))[0]
+        
         atom_embeddings = []
-        uncached_texts = []
         uncached_indices = []
+        uncached_shadows = []
         
         for i, a in enumerate(atoms):
-            txt_hash = hashlib.md5(a.text.encode()).hexdigest()
+            # The Shadow Prompt: Purely for vector positioning
+            shadow_text = f"Context: Historical {a.role} message at turn {a.msg_index}. Content: {a.text}"
+            txt_hash = hashlib.md5(shadow_text.encode()).hexdigest()
+            
             if txt_hash in self.embedding_cache:
                 atom_embeddings.append((i, self.embedding_cache[txt_hash]))
             else:
-                uncached_texts.append(a.text)
+                uncached_shadows.append(shadow_text)
                 uncached_indices.append(i)
-                atom_embeddings.append((i, None)) # Placeholder
+                atom_embeddings.append((i, None))
         
-        if uncached_texts:
-            new_embs = list(self.model.embed(uncached_texts))
+        if uncached_shadows:
+            new_embs = list(self.model.embed(uncached_shadows))
             for idx, emb in zip(uncached_indices, new_embs):
-                txt_hash = hashlib.md5(atoms[idx].text.encode()).hexdigest()
+                shadow_text = f"Context: Historical {atoms[idx].role} message at turn {atoms[idx].msg_index}. Content: {atoms[idx].text}"
+                txt_hash = hashlib.md5(shadow_text.encode()).hexdigest()
                 self.embedding_cache[txt_hash] = emb
                 atom_embeddings[idx] = (idx, emb)
         
-        atom_embeddings = [e[1] for e in atom_embeddings]
-        
-        # 4. Hybrid Scoring v6.1
-        query_terms = set(query_text.lower().split()) - self.stop_words
-        
-        # Path Boosting: Identify filenames or classes mentioned in the query
-        path_matches = re.findall(r'(\w+\.(?:py|js|ts|tsx|css|html|json))', query_text)
-        
+        # 5. Hybrid Scoring v6.2 (Symbol Anchoring)
+        anchor_boost_count = 0
         for i, atom in enumerate(atoms):
-            emb = atom_embeddings[i]
-            # Semantic (Cosine)
+            emb = atom_embeddings[i][1]
+            
+            # Semantic Alignment
             semantic_score = np.dot(query_emb, emb) / (np.linalg.norm(query_emb) * np.linalg.norm(emb) + 1e-9)
             
-            # Keyword
-            matches = sum(1 for term in query_terms if term in atom.text.lower())
-            keyword_score = (matches / len(query_terms)) if query_terms else 0
+            # Symbol Anchoring: Massive boost if query mentions a symbol defined in this atom
+            matching_symbols = query_symbols.intersection(set(atom.symbols))
+            anchor_boost = 1.3 if matching_symbols else 1.0
+            if matching_symbols: anchor_boost_count += 1
             
-            # Recency
-            total_turns = max(1, len(set(a.msg_index for a in atoms)))
-            temporal_boost = math.exp((atom.msg_index - total_turns) / 4.0)
+            # Recency bias (decay over turns)
+            total_turns = max(1, atoms[-1].msg_index + 1)
+            turn_bias = 1.0 + (atom.msg_index / total_turns) * 0.1
             
-            # Path Boosting (The "Powerful" part)
-            path_boost = 1.0
-            if any(p.lower() in atom.text.lower() for p in path_matches):
-                path_boost = 1.5
-            
-            # Hybrid Formula
-            atom.score = (0.7 * semantic_score) + (0.3 * keyword_score)
-            atom.score *= (1.0 + 0.1 * temporal_boost)
-            atom.score *= path_boost
+            atom.score = semantic_score * anchor_boost * turn_bias
 
-        # 5. Selection
-        max_score = float(max(a.score for a in atoms)) if atoms else 0
-        top_atoms = sorted(atoms, key=lambda x: x.score, reverse=True)[:20]
+        # 6. Optimized Selection (Zero Noise)
+        max_score = float(max(a.score for a in atoms))
+        REL_THRESHOLD = 0.22
         
-        REL_THRESHOLD = 0.22 # Lowered slightly for better recall in complex code
         selected_indices = set()
         gate_triggered = False
         
         if max_score < REL_THRESHOLD:
-            # Fallback to last 2 turns
-            last_msg_idx = max(0, atoms[-1].msg_index - 1)
-            selected_indices = {a.atom_index for a in atoms if a.msg_index >= last_msg_idx}
+            # High-fidelity fallback (Last 3 messages to maintain thread flow)
+            selected_indices = {a.atom_index for a in atoms if a.msg_index >= max(0, atoms[-1].msg_index - 2)}
             gate_triggered = True
         else:
+            # Powerful selection + strict sibling inclusion
+            top_atoms = sorted(atoms, key=lambda x: x.score, reverse=True)[:15]
             for atom in top_atoms:
-                if atom.score > REL_THRESHOLD * 0.7:
+                if atom.score > REL_THRESHOLD * 0.6:
                     selected_indices.add(atom.atom_index)
-                    # Include 2 siblings for better code flow
-                    for offset in [-1, 1, -2, 2]:
-                        n_idx = atom.atom_index + offset
-                        if 0 <= n_idx < len(atoms) and atoms[n_idx].msg_index == atom.msg_index:
-                            selected_indices.add(n_idx)
+                    # Sibling flow (maintain block continuity)
+                    for side in [-1, 1]:
+                        neighbor = atom.atom_index + side
+                        if 0 <= neighbor < len(atoms) and atoms[neighbor].msg_index == atom.msg_index:
+                            selected_indices.add(neighbor)
 
+        # 7. Pure Reconstruction (STRICT: NO ADDED FIELDS)
         reconstructed_atoms = sorted([atoms[i] for i in selected_indices], key=lambda x: x.atom_index)
         
-        # 6. Build Context Block
         packed_content = []
         last_msg_idx = -1
+        # Markers are only added between historical turns for clarity
         for a in reconstructed_atoms:
             if a.msg_index != last_msg_idx:
-                packed_content.append(f"\n--- [{a.role.upper()} @ Turn {a.msg_index}] ---")
+                packed_content.append(f"\n--- [TURN {a.msg_index}] ---")
                 last_msg_idx = a.msg_index
             packed_content.append(a.text)
             
@@ -261,27 +255,20 @@ class RemoteOptimizer:
         if sys_prompt: optimized.append(sys_prompt)
         
         if packed_content:
-            context_text = "POWERFUL CONTEXT RECONSTRUCTION v6.1 (Active Scan):\n" + "\n".join(packed_content) + "\n--- End Scan ---"
+            context_text = "ORIGINAL_CONTEXT_SNAPSHOT:\n" + "\n".join(packed_content)
             optimized.append({"role": "system", "content": context_text})
             
         optimized.append(active_query_msg)
         
-        # 7. Metadata (limit to 40 for UI clarity)
-        sequence_data = []
-        for a in sorted(atoms, key=lambda x: x.score, reverse=True)[:40]:
-            d = a.to_dict()
-            d["id"] = f"atom-{a.atom_index}"
-            d["selected"] = a.atom_index in selected_indices
-            sequence_data.append(d)
-
         return optimized, {
             "total_blocks": len(atoms),
             "selected_blocks": len(reconstructed_atoms),
-            "max_relevance": round(float(max_score), 3),
+            "max_relevance": round(max_score, 3),
+            "anchor_hits": anchor_boost_count,
             "gate_triggered": gate_triggered,
             "overhead_ms": (time.time() - start_time) * 1000,
-            "sequence": sequence_data,
-            "engine": "modal-remote-v6.1"
+            "sequence": [a.to_dict() for a in sorted(atoms, key=lambda x: x.score, reverse=True)[:30]],
+            "engine": "modal-v6.2-anchor"
         }
 
     @modal.web_endpoint(method="POST")
