@@ -90,19 +90,23 @@ class RemoteOptimizer:
         # History is everything between system prompts and last message
         history_msgs = [m for m in current_messages[:-1] if m.get("role") != "system"]
         query_msg = current_messages[-1]
-        query_text = query_msg.get("content", "")
-
+        query_content = query_msg.get("content", "")
+        query_text = query_content if isinstance(query_content, str) else json.dumps(query_content)
+        
         if not history_msgs:
             return current_messages, {"mode": "no_history", "overhead_ms": 0}
 
+        # 2. Chunking (Only history)
         chunks = self._chunk_messages(history_msgs)
         if not chunks:
             return current_messages, {"mode": "no_chunks", "overhead_ms": 0}
 
+        # 3. Embedding (Stateless)
         query_emb = list(self.model.embed([f"search_query: {query_text}"]))[0]
         chunk_texts = [f"search_document: {c.text}" for c in chunks]
         chunk_embs = list(self.model.embed(chunk_texts))
 
+        # 4. Hybrid Scoring
         query_symbols = set(re.findall(r'([a-zA-Z_][a-zA-Z0-9_]*)', query_text))
         for i, (chunk, emb) in enumerate(zip(chunks, chunk_embs)):
             sim = np.dot(query_emb, emb) / (np.linalg.norm(query_emb) * np.linalg.norm(emb) + 1e-9)

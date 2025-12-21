@@ -32,7 +32,14 @@ export default function AnalyticsDetailPage() {
                     });
                     const data = await resp.json();
                     const allReqs = data.recent_requests || [];
-                    const req = allReqs.find((r: any) => r.id === params.id);
+
+                    // Priority 1: Match exactly by analytics ID
+                    // Priority 2: Match by session_id (returns the latest one in that thread)
+                    let req = allReqs.find((r: any) => r.id === params.id);
+                    if (!req) {
+                        req = allReqs.find((r: any) => r.session_id === params.id);
+                    }
+
                     if (req) {
                         setRequestData(req);
                         // Filter for other requests in the same fingerprint thread (session_id)

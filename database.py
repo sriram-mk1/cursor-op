@@ -65,9 +65,56 @@ class Database:
             t_in, t_out, t_saved, t_cost, c_saved = original_tokens, 0, 0, 0, 0
 
         try:
+            # 2. Upsert Conversation (Thread Entry)
+            convo_id = None
+            try:
+                # Find current user for metadata if possible
+                key_info = self.supabase.table("api_keys").select("user_id").eq("hashed_key", hashed).single().execute()
+                user_id = key_info.data.get("user_id") if key_info.data else None
+                
+                # Extract first query as title
+                title = "New Conversation"
+                if raw_messages:
+                    for m in raw_messages:
+                        if m.get("role") == "user":
+                            content = m.get("content", "")
+                            if isinstance(content, str):
+                                title = content[:100]
+                                break
+                
+                convo_data = {
+                    "session_id": session_id,
+                    "hashed_key": hashed,
+                    "user_id": user_id,
+                    "last_request_at": now,
+                    "title": title
+                }
+                # Upsert conversation record
+                convo_res = self.supabase.table("conversations").upsert(convo_data, on_conflict="session_id").execute()
+                if convo_res.data:
+                    convo_id = convo_res.data[0]["id"]
+            except Exception as ce:
+                logger.warning(f"Could not upsert conversation: {ce}")
+
+            # 3. Update Session (Living State)
+            try:
+                self.supabase.table("sessions").upsert({
+                    "session_id": session_id,
+                    "data": {"last_model": model, "last_latency": latency_ms},
+                    "updated_at": now
+                }, on_conflict="session_id").execute()
+            except: pass
+
+            # 4. Final Analytics Logs
+            # Pack metadata into reconstruction_log to preserve it for the frontend
+            final_log = reconstruction_log or {}
+            if or_metadata:
+                final_log["or_metadata"] = or_metadata
+
             analytics_data = {
                 "id": str(uuid.uuid4()),
                 "hashed_key": hashed,
+                "conversation_id": convo_id,
                 "session_id": session_id,
                 "model": model,
                 "tokens_in": t_in,
@@ -76,7 +123,7 @@ class Database:
                 "latency_ms": latency_ms,
                 "cost_saved_usd": float(c_saved),
                 "total_cost_usd": float(t_cost),
-                "reconstruction_log": reconstruction_log or {},
+                "reconstruction_log": final_log,
                 "timestamp": now,
                 "or_id": or_metadata.get("id") if or_metadata else None,
                 "raw_messages": raw_messages,
@@ -85,7 +132,7 @@ class Database:
             }
             self.supabase.table("analytics").insert(analytics_data).execute()
 
-            # 3. Update global API Key aggregate stats
+            # 5. Update global API Key aggregate stats
             try:
                 key_data = self.supabase.table("api_keys").select("total_tokens_saved, total_requests").eq("hashed_key", hashed).single().execute()
                 if key_data.data:
@@ -97,8 +144,9 @@ class Database:
                 logger.warning(f"Could not update key stats: {ke}")
 
         except Exception as e:
-            logger.error(f"DB Upsert Error: {e}")
-            res_id = str(uuid.uuid4())
+            logger.error(f"DB Logging Error: {e}")
+            # Ensure we still return the data for the broadcast
+            analytics_data = locals().get("analytics_data", {})
 
         return analytics_data
 
@@ -138,6 +186,17 @@ class Database:
             "total_requests": total_reqs,
             "recent_requests": recent.data or []
         }
+
+    def get_user_conversations(self, user_id: str):
+        """Fetch unique conversation threads for a user."""
+        self._check_db()
+        keys = self.supabase.table("api_keys").select("hashed_key").eq("user_id", user_id).execute()
+        if not keys.data: return []
+        hashes = [k["hashed_key"] for k in keys.data]
+        
+        # Fetch conversations scoped to user's keys
+        res = self.supabase.table("conversations").select("*").in_("hashed_key", hashes).order("last_request_at", desc=True).limit(30).execute()
+        return res.data or []
 
     def get_conversation_detail(self, convo_id: str):
         self._check_db()

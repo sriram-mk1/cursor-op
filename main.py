@@ -132,6 +132,11 @@ async def get_user_stats(x_user_id: Optional[str] = Header(None, alias="x-user-i
     effective_user_id = x_user_id or os.getenv("DEV_USER_ID", "dev-user")
     return db.get_user_stats(effective_user_id)
 
+@app.get("/api/user/conversations")
+async def get_user_conversations(x_user_id: Optional[str] = Header(None, alias="x-user-id")):
+    effective_user_id = x_user_id or os.getenv("DEV_USER_ID", "dev-user")
+    return db.get_user_conversations(effective_user_id)
+
 @app.get("/api/keys")
 async def list_keys(x_user_id: Optional[str] = Header(None, alias="x-user-id")):
     # Local dev bypass
@@ -223,11 +228,25 @@ async def chat(
         msgs = [{"role": "user", "content": request.prompt}]
 
     session_id = request.session_id or x_session_id or generate_conversation_fingerprint(v1_key, msgs)
-    current_payload_history = msgs
+    
+    # 3. Isolation Injection: Pass session fingerprint into the context
+    # This acts as an identifier 'for us' and ensures the LLM 'knows' the thread limits
+    msgs_with_fingerprint = msgs.copy()
+    if msgs_with_fingerprint:
+        # We inject a hidden identifier into the first message or a system message
+        fingerprint_msg = {"role": "system", "content": f"conversation_fingerprint: {session_id}"}
+        # Insert after any existing system prompts, or at start
+        system_indices = [i for i, m in enumerate(msgs_with_fingerprint) if m.get("role") == "system"]
+        if system_indices:
+            msgs_with_fingerprint.insert(system_indices[-1] + 1, fingerprint_msg)
+        else:
+            msgs_with_fingerprint.insert(0, fingerprint_msg)
+
+    current_payload_history = msgs_with_fingerprint
     original_tokens = sum(len(ENCODER.encode(json.dumps(m))) for m in current_payload_history)
     
-    # 3. Context Reconstruction (Observability Phase)
-    optimized_msgs = msgs
+    # 4. Context Reconstruction (Observability Phase)
+    optimized_msgs = msgs_with_fingerprint
     reconstruction_log = {}
     reconstruction_snapshot = ""
 

@@ -3,64 +3,57 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-    ArrowRight, Search, Zap, Clock, Code, Activity, ChevronRight, Plus
+    Search, Zap, MessageSquare, ChevronRight, Plus, Hash, Clock
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { createClient } from "@/utils/supabase";
 
-interface AnalyticsRow {
+interface Conversation {
     id: string;
-    model: string;
-    tokens_in: number;
-    tokens_saved: number;
-    latency_ms: number;
-    timestamp: number;
+    session_id: string;
+    title: string;
+    last_request_at: number;
+    metadata: any;
 }
 
 export default function ObservabilityListPage() {
     const router = useRouter();
-    const [requests, setRequests] = useState<AnalyticsRow[]>([]);
-    const [displayLimit, setDisplayLimit] = useState(10);
+    const [conversations, setConversations] = useState<Conversation[]>([]);
     const [loading, setLoading] = useState(true);
 
     const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8000";
     const supabase = createClient();
 
     useEffect(() => {
-        const fetchRequests = async () => {
+        const fetchConversations = async () => {
             const { data: { user } } = await supabase.auth.getUser();
             const userId = user?.id || (process.env.NODE_ENV === 'development' ? 'dev-user' : null);
 
             if (userId) {
                 try {
-                    const resp = await fetch(`${GATEWAY_URL}/api/user/stats`, {
+                    const resp = await fetch(`${GATEWAY_URL}/api/user/conversations`, {
                         headers: { "x-user-id": userId }
                     });
                     const data = await resp.json();
-                    const fetched = (data.recent_requests || []);
 
-                    if (fetched.length === 0 && process.env.NODE_ENV === 'development') {
-                        // Inject Mock Requests for Local Test
-                        setRequests([
-                            { id: 'mock-1', model: 'anthropic/claude-3-sonnet', tokens_in: 5200, tokens_saved: 4100, latency_ms: 1840, timestamp: Date.now() / 1000 - 3600 },
-                            { id: 'mock-2', model: 'openai/gpt-4-turbo', tokens_in: 8400, tokens_saved: 6200, latency_ms: 3200, timestamp: Date.now() / 1000 - 7200 },
-                            { id: 'mock-3', model: 'meta-llama/llama-3-70b', tokens_in: 2100, tokens_saved: 1500, latency_ms: 950, timestamp: Date.now() / 1000 - 10800 },
-                            { id: 'mock-4', model: 'google/gemini-pro-1.5', tokens_in: 12500, tokens_saved: 9800, latency_ms: 4500, timestamp: Date.now() / 1000 - 14400 },
+                    if (data.length === 0 && process.env.NODE_ENV === 'development') {
+                        setConversations([
+                            { id: 'c1', session_id: 'sess-1', title: 'How to implement RAG with role preservation?', last_request_at: Date.now() / 1000, metadata: {} },
+                            { id: 'c2', session_id: 'sess-2', title: 'Fixing Modal TypeError in FastAPI', last_request_at: Date.now() / 1000 - 3600, metadata: {} },
+                            { id: 'c3', session_id: 'sess-3', title: 'Why are my Supabase logs disappearing?', last_request_at: Date.now() / 1000 - 7200, metadata: {} }
                         ]);
                     } else {
-                        setRequests(fetched.sort((a: any, b: any) => b.timestamp - a.timestamp));
+                        setConversations(data);
                     }
                 } catch (e) {
-                    console.error("Failed to fetch requests", e);
+                    console.error("Failed to fetch conversations", e);
                 }
                 setLoading(false);
             }
         };
-        fetchRequests();
-    }, [supabase.auth, GATEWAY_URL]);
-
-    const loadMore = () => setDisplayLimit(prev => prev + 10);
+        fetchConversations();
+    }, [GATEWAY_URL, supabase.auth]);
 
     return (
         <div className="layout-wrapper">
@@ -68,89 +61,101 @@ export default function ObservabilityListPage() {
             <main className="main-content">
 
                 <header style={{ marginBottom: "48px" }}>
-                    <h1 style={{ fontSize: "24px", fontWeight: 700, letterSpacing: '-0.03em' }}>Deep Observability</h1>
-                    <p className="text-muted" style={{ fontSize: "14px", marginTop: "4px" }}>Select a request to step into the reconstruction observer.</p>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                        <Hash size={20} className="text-accent" />
+                        <h1 style={{ fontSize: "24px", fontWeight: 700, letterSpacing: '-0.03em', margin: 0 }}>Active Threads</h1>
+                    </div>
+                    <p className="text-muted" style={{ fontSize: "14px" }}>
+                        Conversation threads isolated by your unique fingerprint.
+                    </p>
                 </header>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '1000px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))', gap: '20px', maxWidth: '1200px' }}>
                     <AnimatePresence>
-                        {requests.slice(0, displayLimit).map((req, idx) => (
+                        {conversations.map((convo, idx) => (
                             <motion.div
-                                key={req.id}
+                                key={convo.id}
                                 initial={{ opacity: 0, y: 10 }}
                                 animate={{ opacity: 1, y: 0 }}
-                                transition={{ delay: idx * 0.03 }}
-                                onClick={() => router.push(`/analytics/${req.id}`)}
+                                transition={{ delay: idx * 0.05 }}
+                                onClick={() => router.push(`/analytics/${convo.session_id}`)}
                                 className="glass card"
                                 style={{
-                                    padding: '20px 24px',
-                                    display: 'grid',
-                                    gridTemplateColumns: '1fr 1fr 1fr 1fr 40px',
-                                    alignItems: 'center',
+                                    padding: '24px',
                                     cursor: 'pointer',
-                                    transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-                                    border: '1px solid rgba(255,255,255,0.05)'
+                                    border: '1px solid rgba(255,255,255,0.05)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '16px',
+                                    position: 'relative',
+                                    overflow: 'hidden'
                                 }}
-                                whileHover={{ scale: 1.005, borderColor: 'var(--accent)', background: 'rgba(255,255,255,0.03)' }}
+                                whileHover={{
+                                    scale: 1.01,
+                                    borderColor: 'var(--accent)',
+                                    background: 'rgba(255,255,255,0.03)'
+                                }}
                             >
-                                <div>
-                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>TIMESTAMP</div>
-                                    <div style={{ fontSize: '13px', fontWeight: 500 }}>{new Date(req.timestamp * 1000).toLocaleString()}</div>
+                                {/* Isolation Badge */}
+                                <div style={{
+                                    position: 'absolute',
+                                    top: '0',
+                                    right: '0',
+                                    padding: '4px 8px',
+                                    background: 'var(--accent)',
+                                    color: 'black',
+                                    fontSize: '9px',
+                                    fontWeight: 900,
+                                    letterSpacing: '0.1em'
+                                }}>
+                                    ISOLATED
                                 </div>
 
-                                <div>
-                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>MODEL</div>
-                                    <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--accent)' }}>{req.model.split('/').pop()}</div>
-                                </div>
-
-                                <div>
-                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>OPTIMIZATION</div>
-                                    <div style={{ fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                        <Zap size={12} className="text-accent" />
-                                        <span>{((req.tokens_saved / (req.tokens_in + req.tokens_saved || 1)) * 100).toFixed(1)}%</span>
+                                <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                                    <div className="glass" style={{ padding: '8px', borderRadius: '10px', background: 'rgba(var(--accent-rgb), 0.1)' }}>
+                                        <MessageSquare size={16} className="text-accent" />
                                     </div>
+                                    <div style={{ flex: 1 }}>
+                                        <h3 style={{ fontSize: '15px', fontWeight: 600, lineHeight: 1.4, color: 'var(--fg)', marginBottom: '4px' }}>
+                                            {convo.title || "Untitled Conversation"}
+                                        </h3>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px', opacity: 0.4 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                <Clock size={10} />
+                                                {new Date(convo.last_request_at * 1000).toLocaleDateString()}
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                <Zap size={10} className="text-accent" />
+                                                ID: {convo.session_id.slice(0, 8)}...
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <ChevronRight size={18} style={{ opacity: 0.2 }} />
                                 </div>
 
-                                <div>
-                                    <div style={{ fontSize: '10px', fontWeight: 800, opacity: 0.3, marginBottom: '4px', letterSpacing: '0.05em' }}>LATENCY</div>
-                                    <div style={{ fontSize: '13px', opacity: 0.8 }}>{req.latency_ms.toFixed(0)}ms</div>
-                                </div>
-
-                                <div style={{ display: 'flex', justifyContent: 'flex-end', opacity: 0.2 }}>
-                                    <ChevronRight size={18} />
+                                <div style={{
+                                    marginTop: 'auto',
+                                    paddingTop: '16px',
+                                    borderTop: '1px solid rgba(255,255,255,0.05)',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center'
+                                }}>
+                                    <span style={{ fontSize: '10px', fontWeight: 700, opacity: 0.3, letterSpacing: '0.05em' }}>
+                                        VOYAGE OPTIMIZATION ACTIVE
+                                    </span>
+                                    <div className="text-accent" style={{ fontSize: '11px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                        View Pipeline <ChevronRight size={12} />
+                                    </div>
                                 </div>
                             </motion.div>
                         ))}
                     </AnimatePresence>
 
-                    {requests.length > displayLimit && (
-                        <motion.button
-                            onClick={loadMore}
-                            whileHover={{ scale: 1.02, background: 'rgba(255,255,255,0.08)' }}
-                            className="glass"
-                            style={{
-                                marginTop: '12px',
-                                padding: '16px',
-                                borderRadius: '16px',
-                                border: '1px dashed rgba(255,255,255,0.1)',
-                                color: 'rgba(255,255,255,0.4)',
-                                fontSize: '13px',
-                                fontWeight: 600,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                gap: '8px',
-                                cursor: 'pointer'
-                            }}
-                        >
-                            <Plus size={14} /> Load 10 More Requests
-                        </motion.button>
-                    )}
-
-                    {!loading && requests.length === 0 && (
-                        <div style={{ textAlign: 'center', padding: '100px 0', opacity: 0.2 }}>
+                    {!loading && conversations.length === 0 && (
+                        <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: '100px 0', opacity: 0.2 }}>
                             <Search size={48} style={{ margin: '0 auto 16px' }} />
-                            <p>No optimization trails found yet.</p>
+                            <p>No active threads identified.</p>
                         </div>
                     )}
                 </div>
