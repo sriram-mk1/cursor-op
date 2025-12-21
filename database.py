@@ -101,19 +101,7 @@ class Database:
             logger.error(f"DB Upsert Error: {e}")
             res_id = str(uuid.uuid4())
 
-        return {
-            "id": res_id,
-            "session_id": session_id,
-            "model": model,
-            "tokens_in": t_in,
-            "tokens_out": t_out,
-            "tokens_saved": t_saved,
-            "latency_ms": latency_ms,
-            "timestamp": now,
-            "cost_saved_usd": c_saved,
-            "total_cost_usd": t_cost,
-            "potential_total": original_tokens
-        }
+        return analytics_data
 
     def get_stats(self, api_key_raw: str):
         self._check_db()
